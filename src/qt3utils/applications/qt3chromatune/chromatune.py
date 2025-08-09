@@ -1,6 +1,7 @@
 import ctypes
 from nkt_tools.extreme import Extreme
 
+
 class Chromatune(Extreme):
     """
     Full Chromatune wrapper, adding all Optical-Filter registers (§6.22)
@@ -11,6 +12,17 @@ class Chromatune(Extreme):
 
     def __init__(self, portname=None):
         super().__init__(portname)
+
+    def open_ethernet(self, ip: str, port: int = 10001):
+        """
+        Open a TCP/IP connection to the laser at <ip>:<port>.
+        """
+        # Store for later error messages / debugging
+        self.portname = f"{ip}:{port}"
+        # The NKTP_DLL.Open call actually
+        # switches to Ethernet when it sees a colon in the portname,
+        # and uses the numeric port as a timeout (we pass it again for safety).
+        self.dll.Open(self.portname.encode('ascii'), ctypes.c_int(port))
 
     # ─── Main board extensions ──────────────────────────────────────────────
 
