@@ -1,3 +1,7 @@
+import math
+import threading
+import time
+from typing import Callable
 import nkt_tools.NKTP_DLL as nkt
 
 class Chromatune():
@@ -49,47 +53,47 @@ class Chromatune():
         dev = self.MAIN_MODULE_ADDRESS if dev is None else dev
         res, val = nkt.registerReadU8(self.port_name, dev, reg, index)
         if res != 0:
-            raise RuntimeError(f"registerReadU8 reg=0x{reg:02X} failed: {nkt.RegisterStatusTypes(res)}")
+            raise RuntimeError(f"registerReadU8 reg=0x{reg:02X} failed: {nkt.RegisterResultTypes(res)}")
         return val
 
     def _read_s16(self, reg: int, index: int = -1, dev: int = None) -> int:
         dev = self.MAIN_MODULE_ADDRESS if dev is None else dev
         res, val = nkt.registerReadS16(self.port_name, dev, reg, index)
         if res != 0:
-            raise RuntimeError(f"registerReadS16 reg=0x{reg:02X} failed: {nkt.RegisterStatusTypes(res)}")
+            raise RuntimeError(f"registerReadS16 reg=0x{reg:02X} failed: {nkt.RegisterResultTypes(res)}")
         return val
 
     def _read_u16(self, reg: int, index: int = -1, dev: int = None) -> int:
         dev = self.MAIN_MODULE_ADDRESS if dev is None else dev
         res, val = nkt.registerReadU16(self.port_name, dev, reg, index)
         if res != 0:
-            raise RuntimeError(f"registerReadU16 reg=0x{reg:02X} failed: {nkt.RegisterStatusTypes(res)}")
+            raise RuntimeError(f"registerReadU16 reg=0x{reg:02X} failed: {nkt.RegisterResultTypes(res)}")
         return val
 
     def _read_u32(self, reg: int, index: int = -1, dev: int = None) -> int:
         dev = self.MAIN_MODULE_ADDRESS if dev is None else dev
         res, val = nkt.registerReadU32(self.port_name, dev, reg, index)
         if res != 0:
-            raise RuntimeError(f"registerReadU32 reg=0x{reg:02X} failed: {nkt.RegisterStatusTypes(res)}")
+            raise RuntimeError(f"registerReadU32 reg=0x{reg:02X} failed: {nkt.RegisterResultTypes(res)}")
         return val
 
     def _write_u8(self, reg: int, value: int, index: int = -1, dev: int = None) -> None:
         dev = self.MAIN_MODULE_ADDRESS if dev is None else dev
         res = nkt.registerWriteU8(self.port_name, dev, reg, value, index)
         if res != 0:
-            raise RuntimeError(f"registerWriteU8 reg=0x{reg:02X} val={value} failed: {nkt.RegisterStatusTypes(res)}")
+            raise RuntimeError(f"registerWriteU8 reg=0x{reg:02X} val={value} failed: {nkt.RegisterResultTypes(res)}")
 
     def _write_u16(self, reg: int, value: int, index: int = -1, dev: int = None) -> None:
         dev = self.MAIN_MODULE_ADDRESS if dev is None else dev
         res = nkt.registerWriteU16(self.port_name, dev, reg, value, index)
         if res != 0:
-            raise RuntimeError(f"registerWriteU16 reg=0x{reg:02X} val={value} failed: {nkt.RegisterStatusTypes(res)}")
+            raise RuntimeError(f"registerWriteU16 reg=0x{reg:02X} val={value} failed: {nkt.RegisterResultTypes(res)}")
 
     def _write_u32(self, reg: int, value: int, index: int = -1, dev: int = None) -> None:
         dev = self.MAIN_MODULE_ADDRESS if dev is None else dev
         res = nkt.registerWriteU32(self.port_name, dev, reg, value, index)
         if res != 0:
-            raise RuntimeError(f"registerWriteU32 reg=0x{reg:02X} val={value} failed: {nkt.RegisterStatusTypes(res)}")
+            raise RuntimeError(f"registerWriteU32 reg=0x{reg:02X} val={value} failed: {nkt.RegisterResultTypes(res)}")
 
 
     # -------------------- MAIN module API --------------------
@@ -104,10 +108,11 @@ class Chromatune():
         self._write_u8(0x30, 0x03 if on else 0x00, -1)
 
 
-    # Setup (0x31, U16: 0=ConstCurrent, 1=ConstPower, 2=ExtCurr, 3=ExtPower, 4=PowerLock)
+    # Setup (0x31, U8: 0=ConstCurrent, 1=ConstPower, 2=ExtCurr, 3=ExtPower, 4=PowerLock)
+    # Note: the official sdk manual says to use unsigned 16 bit for get_setup_mode but that throws an error...
     def get_setup_mode(self) -> int:
-        """Read 16-bit Setup mode from reg 0x31."""
-        return self._read_u16(0x31, -1)
+        """Read 8-bit Setup mode from reg 0x31."""
+        return self._read_u8(0x31, -1)
 
     def set_setup_mode(self, mode: int) -> None:
         """Write 16-bit Setup mode to reg 0x31 (0..4)."""
@@ -192,20 +197,20 @@ class Chromatune():
     
 
     # Status bits (0x66, U16)
-    def get_status_bits(self) -> int:
-        return self._read_u16(0x66, -1)
+    # def get_status_bits(self) -> int:
+    #     return self._read_u16(0x66, -1)
     
-    def status_dict(self) -> dict:
-        """Decode a few commonly-used status bits from reg 0x66."""
-        bits = self.get_status_bits()
-        return {
-            "emission_on": bool(bits & (1 << 0)),
-            "interlock_relays_off": bool(bits & (1 << 1)),
-            "interlock_loop_open": bool(bits & (1 << 3)),
-            "supply_voltage_low": bool(bits & (1 << 5)),
-            "inlet_temp_out_of_range": bool(bits & (1 << 6)),
-            "system_error_code_present": bool(bits & (1 << 15)),
-        }
+    # def status_dict(self) -> dict:
+    #     """Decode a few commonly-used status bits from reg 0x66."""
+    #     bits = self.get_status_bits()
+    #     return {
+    #         "emission_on": bool(bits & (1 << 0)),
+    #         "interlock_relays_off": bool(bits & (1 << 1)),
+    #         "interlock_loop_open": bool(bits & (1 << 3)),
+    #         "supply_voltage_low": bool(bits & (1 << 5)),
+    #         "inlet_temp_out_of_range": bool(bits & (1 << 6)),
+    #         "system_error_code_present": bool(bits & (1 << 15)),
+    #     }
     
 
     # -------------------- FILTER module (dev 0x07) --------------------
@@ -232,7 +237,6 @@ class Chromatune():
 
     # --- filter setting (center/bandwidth/power) ---
     def get_center_wavelength_nm(self) -> float:
-        """reg 0x32 index 0 (U16, 0.1 nm)."""
         v = self._read_u16(0x32, index=0, dev=self.FILTER_MODULE_ADDRESS)
         return v / 10.0
 
@@ -240,28 +244,26 @@ class Chromatune():
         self._write_u16(0x32, int(round(nm * 10)), index=0, dev=self.FILTER_MODULE_ADDRESS)
 
     def get_bandwidth_nm(self) -> float:
-        """reg 0x32 index 1 (U16, 0.1 nm)."""
-        v = self._read_u16(0x32, index=1, dev=self.FILTER_MODULE_ADDRESS)
+        v = self._read_u16(0x32, index=2, dev=self.FILTER_MODULE_ADDRESS)   # byte offset 2
         return v / 10.0
 
     def set_bandwidth_nm(self, nm: float) -> None:
-        self._write_u16(0x32, int(round(nm * 10)), index=1, dev=self.FILTER_MODULE_ADDRESS)
+        self._write_u16(0x32, int(round(nm * 10)), index=2, dev=self.FILTER_MODULE_ADDRESS)
 
     def get_filter_power_nw(self) -> int:
-        """reg 0x32 index 2 (U32, nW)."""
-        return self._read_u32(0x32, index=2, dev=self.FILTER_MODULE_ADDRESS)
+        return self._read_u32(0x32, index=4, dev=self.FILTER_MODULE_ADDRESS)  # byte offset 4
 
     def set_filter_power_nw(self, power_nw: int) -> None:
         if power_nw < 0:
             raise ValueError("power must be >= 0 nW")
-        self._write_u32(0x32, int(power_nw), index=2, dev=self.FILTER_MODULE_ADDRESS)
+        self._write_u32(0x32, int(power_nw), index=4, dev=self.FILTER_MODULE_ADDRESS)
 
     def set_filter(self, center_nm: float, bandwidth_nm: float, power_nw: int | None = None) -> None:
-        """Convenience: program center, bandwidth, and optional power."""
         self.set_center_wavelength_nm(center_nm)
         self.set_bandwidth_nm(bandwidth_nm)
         if power_nw is not None:
             self.set_filter_power_nw(power_nw)
+
 
 
     # --- ND filter ---
@@ -331,71 +333,177 @@ class Chromatune():
     def get_runtime_seconds(self) -> int:
         """reg 0x80 (U32)."""
         return self._read_u32(0x80, dev=self.FILTER_MODULE_ADDRESS)
+    
 
+    # --- Wavelength Sweep Scan ---
 
-    # --- spectrum ---
-    def get_spectrum_range_pixels(self) -> tuple[int, int]:
-        """reg 0xE3: (start, end); count = end - start."""
-        start = self._read_u16(0xE3, index=0, dev=self.FILTER_MODULE_ADDRESS)
-        end   = self._read_u16(0xE3, index=1, dev=self.FILTER_MODULE_ADDRESS)
-        return start, end
-
-    def _filter_status_bits(self) -> int:
-        return self._read_u32(0x66, dev=self.FILTER_MODULE_ADDRESS)
-
-    def _wait_image_ready(self, timeout_s: float = 3.0, poll_s: float = 0.05) -> bool:
-        """Wait for 0x66 bit10 (image ready) AND bit0 (shutter open)."""
-        import time
+    def _wait_filter_idle(self, timeout_s: float = 3.0, poll_s: float = 0.02) -> bool:
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            b = self._filter_status_bits()
-            if (b & (1 << 10)) and (b & (1 << 0)):
+            b = self.get_status_bits_filter()
+            moving = (b >> 16) & 0b1_1111  # bits 16..20
+            if moving == 0:
                 return True
             time.sleep(poll_s)
         return False
 
-    def _set_array_index_bytes(self, byte_offset: int) -> None:
-        """reg 0x8F (U32): byte offset for E4/E5 array reads."""
-        self._write_u32(0x8F, int(byte_offset), dev=self.FILTER_MODULE_ADDRESS)
+    def sweep_wavelength(
+        self,
+        start_nm: float,
+        end_nm: float,
+        t_forward_s: float,
+        *,
+        t_backward_s: float | None = None,
+        loops: int = 1,
+        step_nm: float = 0.1,
+        wait_for_idle: bool = True,
+        settle_ms: int = 50,
+        read_power: bool = False,
+        callback: Callable | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        """
+        Blockingly sweep center wavelength between start_nm and end_nm.
 
-    def read_wavelengths_nm(self) -> list[float]:
-        """
-        Read wavelength array (reg 0xE5). Values are U16 with 0.02 nm resolution.
-        Wavelengths are static; cache them if desired.
-        """
-        start, end = self.get_spectrum_range_pixels()
-        n = max(0, end - start)
-        wl_nm: list[float] = []
-        for i in range(n):
-            self._set_array_index_bytes(2 * i)                 # 2 bytes per U16
-            raw = self._read_u16(0xE5, dev=self.FILTER_MODULE_ADDRESS)
-            wl_nm.append(raw * 0.02)
-        return wl_nm
+        loops:
+          1 → start→end only
+          2 → start→end then end→start
+          3 → (start→end→start) + start→end, etc.
 
-    def read_amplitudes(self) -> list[int]:
+        t_backward_s:
+          If None, use t_forward_s for the backward leg.
         """
-        Read spectral amplitudes (reg 0xE4). Each element is U16.
-        Units reported in docs vary (uW/nm vs mW/nm); treat as raw counts and
-        scale per your firmware if needed.
-        """
-        if not self._wait_image_ready():
-            raise TimeoutError("Spectral image not ready / shutter not open (status 0x66)")
+        if loops < 1:
+            return
 
-        start, end = self.get_spectrum_range_pixels()
-        n = max(0, end - start)
-        amps: list[int] = []
-        for i in range(n):
-            self._set_array_index_bytes(2 * i)
-            raw = self._read_u16(0xE4, dev=self.FILTER_MODULE_ADDRESS)
-            amps.append(raw)
-        return amps
+        # Clamp to device limits
+        bw_min, bw_max = self.get_bandwidth_limits_nm()  # (min,max)
+        # Chromatune wavelength range isn’t in that call; assume caller picks a valid range.
 
-    def read_full_spectrum(self, refresh_wavelengths: bool = False) -> tuple[list[float], list[int]]:
-        """
-        Return (wavelengths_nm, amplitudes). Wavelengths are cached by default.
-        """
-        if not hasattr(self, "_cached_wl_nm") or refresh_wavelengths:
-            self._cached_wl_nm = self.read_wavelengths_nm()
-        amplitudes = self.read_amplitudes()
-        m = min(len(self._cached_wl_nm), len(amplitudes))
-        return self._cached_wl_nm[:m], amplitudes[:m]
+        # Build one leg as a list of setpoints and dwell time
+        def make_leg(a_nm: float, b_nm: float, dur_s: float):
+            distance = abs(b_nm - a_nm)
+            steps = max(1, math.ceil(distance / max(step_nm, 1e-6)))
+            dwell = dur_s / steps
+            # Generate inclusive endpoints (steps points)
+            if b_nm >= a_nm:
+                wls = [a_nm + i * (distance / steps) for i in range(steps)]
+                wls.append(b_nm)
+            else:
+                wls = [a_nm - i * (distance / steps) for i in range(steps)]
+                wls.append(b_nm)
+            return wls, dwell
+
+        back_time = t_backward_s if t_backward_s is not None else t_forward_s
+
+        # Execute one leg (list of wavelengths)
+        def run_leg(wls: list[float], dwell_s: float):
+            for wl in wls:
+                if stop_event and stop_event.is_set():
+                    return
+                self.set_center_wavelength_nm(wl)
+                if wait_for_idle:
+                    self._wait_filter_idle(timeout_s=min(dwell_s, 1.0))
+                if settle_ms > 0:
+                    time.sleep(settle_ms / 1000.0)
+                power = None
+                if read_power:
+                    try:
+                        power = self.get_photodiode_power_nw()
+                    except Exception:
+                        power = None
+                if callback:
+                    try:
+                        callback(wavelength_nm=wl, power_nw=power)
+                    except Exception:
+                        pass
+                # Use remaining dwell time for pacing
+                # (We already waited during settle + idle; this tops it up.)
+                if dwell_s > 0:
+                    time.sleep(max(0.0, dwell_s - (settle_ms / 1000.0)))
+
+        # Prepare forward/backward wavelength lists once
+        f_wls, f_dwell = make_leg(start_nm, end_nm, t_forward_s)
+        b_wls, b_dwell = make_leg(end_nm, start_nm, back_time)
+
+        # Ensure emission/shutter are in a sane state (best effort; ignore errors)
+        try:
+            self.set_shutter_mode(2)  # auto
+        except Exception:
+            pass
+
+        # Run the requested number of loops
+        for k in range(loops):
+            # even-numbered legs: forward; odd: backward
+            if (k % 2) == 0:
+                run_leg(f_wls, f_dwell)
+            else:
+                run_leg(b_wls, b_dwell)
+
+
+    # --- spectrum ---
+    # def get_spectrum_range_pixels(self) -> tuple[int, int]:
+    #     """reg 0xE3: (start, end); count = end - start."""
+    #     start = self._read_u16(0xE3, index=0, dev=self.FILTER_MODULE_ADDRESS)
+    #     end   = self._read_u16(0xE3, index=1, dev=self.FILTER_MODULE_ADDRESS)
+    #     return start, end
+
+    # def _filter_status_bits(self) -> int:
+    #     return self._read_u32(0x66, dev=self.FILTER_MODULE_ADDRESS)
+
+    # def _wait_image_ready(self, timeout_s: float = 3.0, poll_s: float = 0.05) -> bool:
+    #     """Wait for 0x66 bit10 (image ready) AND bit0 (shutter open)."""
+    #     import time
+    #     deadline = time.time() + timeout_s
+    #     while time.time() < deadline:
+    #         b = self._filter_status_bits()
+    #         if (b & (1 << 10)) and (b & (1 << 0)):
+    #             return True
+    #         time.sleep(poll_s)
+    #     return False
+
+    # def _set_array_index_bytes(self, byte_offset: int) -> None:
+    #     """reg 0x8F (U32): byte offset for E4/E5 array reads."""
+    #     self._write_u32(0x8F, int(byte_offset), dev=self.FILTER_MODULE_ADDRESS)
+
+    # def read_wavelengths_nm(self) -> list[float]:
+    #     """
+    #     Read wavelength array (reg 0xE5). Values are U16 with 0.02 nm resolution.
+    #     Wavelengths are static; cache them if desired.
+    #     """
+    #     start, end = self.get_spectrum_range_pixels()
+    #     n = max(0, end - start)
+    #     wl_nm: list[float] = []
+    #     for i in range(n):
+    #         self._set_array_index_bytes(2 * i)                 # 2 bytes per U16
+    #         raw = self._read_u16(0xE5, dev=self.FILTER_MODULE_ADDRESS)
+    #         wl_nm.append(raw * 0.02)
+    #     return wl_nm
+
+    # def read_amplitudes(self) -> list[int]:
+    #     """
+    #     Read spectral amplitudes (reg 0xE4). Each element is U16.
+    #     Units reported in docs vary (uW/nm vs mW/nm); treat as raw counts and
+    #     scale per your firmware if needed.
+    #     """
+    #     if not self._wait_image_ready():
+    #         raise TimeoutError("Spectral image not ready / shutter not open (status 0x66)")
+
+    #     start, end = self.get_spectrum_range_pixels()
+    #     n = max(0, end - start)
+    #     amps: list[int] = []
+    #     for i in range(n):
+    #         self._set_array_index_bytes(2 * i)
+    #         raw = self._read_u16(0xE4, dev=self.FILTER_MODULE_ADDRESS)
+    #         amps.append(raw)
+    #     return amps
+
+    # def read_full_spectrum(self, refresh_wavelengths: bool = False) -> tuple[list[float], list[int]]:
+    #     """
+    #     Return (wavelengths_nm, amplitudes). Wavelengths are cached by default.
+    #     """
+    #     if not hasattr(self, "_cached_wl_nm") or refresh_wavelengths:
+    #         self._cached_wl_nm = self.read_wavelengths_nm()
+    #     amplitudes = self.read_amplitudes()
+    #     m = min(len(self._cached_wl_nm), len(amplitudes))
+    #     return self._cached_wl_nm[:m], amplitudes[:m]
