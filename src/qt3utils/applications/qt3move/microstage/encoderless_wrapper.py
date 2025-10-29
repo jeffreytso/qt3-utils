@@ -1,20 +1,11 @@
 import time
-from mcl_wrapper import MCL_Microdrive, MCL_MD_Exceptions
+from .mcl_wrapper import MCL_Microdrive, MCL_MD_Exceptions
 
 # --- Physical Constants ---
 # The conversion factor from your manual: 1 microstep = 95.25 nm = 0.09525 µm = 0.00009525 mm
 MICRONS_PER_MICROSTEP = 0.09525 
-
-# --- Configuration Constants ---
-# Default speed for stage movements in mm/s, as required by the low-level DLL function.
-DEFAULT_VELOCITY_MM_PER_SEC = 0.5 
 # A safe number of steps for each hop during homing, well within 16-bit limits.
 HOMING_CHUNK_STEPS = 30000 # About 3 mm
-# A small distance in µm to overshoot the target for backlash compensation.
-BACKLASH_COMP_UM = 10.0
-# Software travel limits in µm
-X_LIMIT_UM = 12000.0
-Y_LIMIT_UM = 12000.0
 
 
 class EncoderlessMicrostage:
@@ -22,9 +13,29 @@ class EncoderlessMicrostage:
     A high-level Python wrapper to control a Mad City Labs MicroStage
     without encoders, implementing dead reckoning and high-precision move logic.
     """
-    def __init__(self):
+    def __init__(self, config: dict = None):
+        '''
+        Initialize the EncoderlessMicrostage class.
+        '''
+        # Initialize the MCL_Microdrive and handle
         self.mcl = None
         self.handle = None
+        
+        # Set default configuration values
+        self.x_min = 0.0
+        self.x_max = 12000.0
+        self.y_min = 0.0
+        self.y_max = 12000.0
+        self.velocity = 0.5
+        
+        # Apply configuration if provided
+        if config:
+            self.x_min = config.get('x_min', self.x_min)
+            self.x_max = config.get('x_max', self.x_max)
+            self.y_min = config.get('y_min', self.y_min)
+            self.y_max = config.get('y_max', self.y_max)
+            self.velocity = config.get('velocity', self.velocity)
+        
         try:
             self.mcl = MCL_Microdrive()
             self.handle = self.mcl.init_handle()
@@ -37,13 +48,13 @@ class EncoderlessMicrostage:
         self.y_pos_steps = 0
         
         print(f"Connected to stage (Handle: {self.handle}). Position is unreferenced.")
-        print(f"Software limits set to X: {X_LIMIT_UM} µm, Y: {Y_LIMIT_UM} µm.")
+        print(f"Software limits set to X: {self.x_min}-{self.x_max} µm, Y: {self.y_min}-{self.y_max} µm.")
         print("Run find_home() to establish a (0, 0) origin at the bottom-right corner.")
 
     def _wait_for_move(self):
         """Private helper function to block execution until a move is complete."""
         time.sleep(0.1)
-        while self.mcl.move_status(self.handle):
+        while self.is_moving():
             time.sleep(0.05)
         time.sleep(0.1)
 
@@ -58,13 +69,11 @@ class EncoderlessMicrostage:
         print("Homing Y axis (moving to bottom limit)...")
         while True:
             status = bin(self.mcl.status(self.handle))
-            print("currstats: " + status)
-            print(self.mcl.current_position_m(2, self.handle))
             if status[6] == "0":
                 print("  - Y reverse limit switch is active.")
                 break
             try:
-                self.mcl.move_m(2, DEFAULT_VELOCITY_MM_PER_SEC, -HOMING_CHUNK_STEPS, self.handle)
+                self.mcl.move_m(2, self.velocity, -HOMING_CHUNK_STEPS, self.handle)
             except MCL_MD_Exceptions as e:
                 print("exception")
                 break
@@ -74,23 +83,20 @@ class EncoderlessMicrostage:
         # print("Homing X axis (moving to right limit)...")
         while True:
             status = bin(self.mcl.status(self.handle))
-            print("currstats: " + status)
-            print(self.mcl.current_position_m(1, self.handle))
 
             if status[8] == "0":
                 print("  - X reverse limit switch is active.")
                 break
             try:
-                self.mcl.move_m(1, DEFAULT_VELOCITY_MM_PER_SEC, -HOMING_CHUNK_STEPS, self.handle)
+                self.mcl.move_m(1, self.velocity, -HOMING_CHUNK_STEPS, self.handle)
             except MCL_MD_Exceptions as e:
                 print("exception")
                 break
             self._wait_for_move()
 
         # Virtually set this physical location as our (0, 0) origin
-        print("final status: " + bin(self.mcl.status(self.handle)))
         self.set_position(0, 0)
-        print("✅ Homing successful. Bottom-right corner is now defined as (0, 0). Binary status is " + bin(self.mcl.status(self.handle)) + ".")
+        print("✅ Homing successful. Bottom-right corner is now defined as (0, 0).")
 
     def return_to_home(self):
         """Moves the stage back to the defined (0, 0) origin."""
@@ -108,18 +114,16 @@ class EncoderlessMicrostage:
         Moves to an absolute position in µm with backlash compensation and optional step snapping.
         """
         
-        if not (0 <= target_x_um <= X_LIMIT_UM and 0 <= target_y_um <= Y_LIMIT_UM):
-            print(f"Target is outside allowed range of {X_LIMIT_UM} by {Y_LIMIT_UM} µm.")
-            target_x_um = max(0, min(X_LIMIT_UM, target_x_um))
-            target_y_um = max(0, min(Y_LIMIT_UM, target_y_um))
+        if not (self.x_min <= target_x_um <= self.x_max and self.y_min <= target_y_um <= self.y_max):
+            print(f"Target is outside allowed range of {self.x_min}-{self.x_max} by {self.y_min}-{self.y_max} µm.")
+            target_x_um = max(self.x_min, min(self.x_max, target_x_um))
+            target_y_um = max(self.y_min, min(self.y_max, target_y_um))
             print(f"Defaulting to nearest valid position within limits: ({target_x_um:.3f}, {target_y_um:.3f}) µm")
 
-
-        print(f"Moving to ({target_x_um:.3f}, {target_y_um:.3f}) µm")
         
         self._execute_move(target_x_um, target_y_um)
 
-        print(f"Arrived at ({target_x_um:.3f}, {target_y_um:.3f}) µm")
+        print(f"Arrived at {self.get_position()} µm")
 
     def _execute_move(self, target_x_um, target_y_um):
         """A private helper method that breaks large moves into smaller, safe chunks."""
@@ -142,7 +146,7 @@ class EncoderlessMicrostage:
             while remaining_steps != 0:
                 chunk = sign * min(abs(remaining_steps), HOMING_CHUNK_STEPS)
                 try:
-                    self.mcl.move_m(axis, DEFAULT_VELOCITY_MM_PER_SEC, chunk, self.handle)
+                    self.mcl.move_m(axis, self.velocity, chunk, self.handle)
                 except MCL_MD_Exceptions as e:
                     print(f"⚠️ Move aborted due to hardware error: {e}")
                     return
@@ -155,6 +159,10 @@ class EncoderlessMicrostage:
         """Resets the internal counters to define the current location as (x, y) µm."""
         self.x_pos_steps = round(x_um / MICRONS_PER_MICROSTEP)
         self.y_pos_steps = round(y_um / MICRONS_PER_MICROSTEP)
+
+    def is_moving(self):
+        """Returns True if the stage is moving, False otherwise."""
+        return True if self.mcl.move_status(self.handle) else False
 
     def close(self):
         """Releases the hardware handle."""

@@ -1,0 +1,58 @@
+QDLMOVE:
+  Positioners:      # Add positioner configs defiend below; edit the GUI/application accordingly.
+    - Microstage
+    # - PiezoX      # Commented out for testing without piezo hardware
+    # - PiezoY
+    # - PiezoZ
+
+  Microstage:
+    import_path : microstage.encoderless_wrapper
+    class_name  : EncoderlessMicrostage
+    configure :
+      x_min: 0.0        # Minimum position in microns
+      x_max: 12000.0    # Maximum position in microns
+      y_min: 0.0        # Minimum position in microns
+      y_max: 12000.0    # Maximum position in microns
+      velocity: 0.5   # Speed in mm/s
+
+  PiezoX:
+    import_path : piezo.nidaq_position
+    class_name  : NidaqPositionController
+    configure:
+      device_name: Dev1
+      write_channel: ao0
+      read_channel: 
+      move_settle_time: 0.0         # Time in seconds to wait after movement
+      scale_microns_per_volt: 5     # Number of microns moved per volt
+      zero_microns_volt_offset: 5   # Value of voltage at position 0 microns
+      min_position: -25.0           # Minimum position in microns
+      max_position: 25.0            # Maximum position in microns
+      invert_axis: True             # If True, modifies scale and offset internally to invert axis
+
+  PiezoY:
+    import_path : piezo.nidaq_position
+    class_name  : NidaqPositionController
+    configure:
+      device_name: Dev1
+      write_channel: ao1
+      read_channel: 
+      move_settle_time: 0.0
+      scale_microns_per_volt: 5
+      zero_microns_volt_offset: 5
+      min_position: -25.0
+      max_position: 25.0
+      invert_axis: True
+
+  PiezoZ:
+    import_path : piezo.nidaq_position
+    class_name  : NidaqPositionController
+    configure:
+      device_name: Dev1
+      write_channel: ao2
+      read_channel: 
+      move_settle_time: 0.0
+      scale_microns_per_volt: 5
+      zero_microns_volt_offset: 5
+      min_position: -25.0
+      max_position: 25.0
+      invert_axis: True
