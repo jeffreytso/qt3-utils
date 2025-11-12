@@ -1,3 +1,5 @@
+import time
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 import yaml
@@ -65,8 +67,8 @@ class Qt3MoveApp(tk.Tk):
         self.is_homed = False
         
         # Movement indicator variables
-        self.microstage_moving_var = tk.StringVar(value="")
         self.microstage_status_var = tk.StringVar(value="Ready")
+        self.movement_in_progress = False
         
         # Stepping control variables
         self.stepping_controller_var = tk.StringVar(value="None")
@@ -184,10 +186,11 @@ class Qt3MoveApp(tk.Tk):
         # --- Homing and Setup Frame ---
         setup_frame = ttk.LabelFrame(main_frame, text="Setup", padding="10")
         setup_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
-        setup_frame.columnconfigure((0, 1), weight=1)
+        setup_frame.columnconfigure((0, 1, 2), weight=1)
         
         ttk.Button(setup_frame, text="Find Home (Set 0,0)", command=self._find_home).grid(row=0, column=0, padx=5, sticky="ew")
         ttk.Button(setup_frame, text="Return to Home", command=self._return_to_home).grid(row=0, column=1, padx=5, sticky="ew")
+        ttk.Button(setup_frame, text="Move to Center", command=self._move_to_center).grid(row=0, column=2, padx=5, sticky="ew")
 
         # --- Main Position Control Frame ---
         control_frame = ttk.LabelFrame(main_frame, text="Microstage Control", padding="10")
@@ -196,32 +199,23 @@ class Qt3MoveApp(tk.Tk):
         # Header Labels
         ttk.Label(control_frame, text="Set Value (µm)").grid(row=0, column=2, padx=5, pady=5)
         ttk.Label(control_frame, text="Current (µm)").grid(row=0, column=3, padx=5, pady=5)
-        ttk.Label(control_frame, text="Status").grid(row=0, column=4, padx=5, pady=5)
 
         # X-Axis Controls
         ttk.Label(control_frame, text="X axis").grid(row=1, column=0, sticky="w", padx=5)
         ttk.Button(control_frame, text="Set Position", command=self._set_x_position).grid(row=1, column=1, padx=5)
         ttk.Entry(control_frame, textvariable=self.x_set_var, width=10).grid(row=1, column=2)
         ttk.Label(control_frame, textvariable=self.x_current_var, width=10, relief="sunken", anchor="center").grid(row=1, column=3, padx=5)
-        # Movement indicator for X axis
-        self.x_moving_label = ttk.Label(control_frame, text="", width=8, anchor="center")
-        self.x_moving_label.grid(row=1, column=4, padx=5)
         
         # Y-Axis Controls
         ttk.Label(control_frame, text="Y axis").grid(row=2, column=0, sticky="w", padx=5, pady=(5,0))
         ttk.Button(control_frame, text="Set Position", command=self._set_y_position).grid(row=2, column=1, padx=5, pady=(5,0))
         ttk.Entry(control_frame, textvariable=self.y_set_var, width=10).grid(row=2, column=2, pady=(5,0))
         ttk.Label(control_frame, textvariable=self.y_current_var, width=10, relief="sunken", anchor="center").grid(row=2, column=3, padx=5, pady=(5,0))
-        # Movement indicator for Y axis
-        self.y_moving_label = ttk.Label(control_frame, text="", width=8, anchor="center")
-        self.y_moving_label.grid(row=2, column=4, padx=5, pady=(5,0))
         
         # Overall microstage status
         ttk.Label(control_frame, text="Microstage:").grid(row=3, column=0, sticky="w", padx=5, pady=(10,0))
-        self.microstage_status_label = ttk.Label(control_frame, textvariable=self.microstage_status_var, width=15, relief="sunken", anchor="center")
+        self.microstage_status_label = ttk.Label(control_frame, textvariable=self.microstage_status_var, width=20, relief="sunken", anchor="center")
         self.microstage_status_label.grid(row=3, column=1, columnspan=2, padx=5, pady=(10,0))
-        self.microstage_moving_label = ttk.Label(control_frame, textvariable=self.microstage_moving_var, width=8, anchor="center", font=("Arial", 12, "bold"))
-        self.microstage_moving_label.grid(row=3, column=4, padx=5, pady=(10,0))
 
         # --- Stepping Control Frame ---
         stepping_frame = ttk.LabelFrame(main_frame, text="Stepping Control", padding="10")
@@ -325,51 +319,117 @@ class Qt3MoveApp(tk.Tk):
                 messagebox.showwarning("Homing Required", "Please run the 'Find Home' sequence first to calibrate the stage position.")
             return False
         return True
+    
+    def _run_movement_in_thread(self, movement_func, *args, **kwargs):
+        """Run a movement function in a background thread to keep GUI responsive"""
+        if self.movement_in_progress:
+            return
+        
+        def movement_wrapper():
+            self.movement_in_progress = True
+            try:
+                movement_func(*args, **kwargs)
+            except Exception as e:
+                # Schedule error handling on main thread
+                self.after(0, lambda: self._handle_movement_error(e))
+            finally:
+                self.movement_in_progress = False
+        
+        thread = threading.Thread(target=movement_wrapper, daemon=True)
+        thread.start()
+    
+    def _handle_movement_error(self, error):
+        """Handle movement errors on the main thread"""
+        self.microstage_status_var.set("Error")
+        self.microstage_status_label.config(foreground="red")
+        messagebox.showerror("Movement Error", f"An error occurred: {error}")
 
     def _find_home(self):
         try:
-            self.microstage_status_var.set("Homing...")
+            self.microstage_status_var.set("HOMING...")
             self.microstage_status_label.config(foreground="orange")
-            self.microstage_moving_var.set("● HOMING")
-            self.microstage_moving_label.config(foreground="red")
+            # Force GUI update to show the status immediately
+            self.update_idletasks()
             
-            self.stage.find_home()
-            self.is_homed = True
-            self.stage.get_position() # Update internal state if necessary
+            # Run homing in background thread
+            def find_home_thread():
+                try:
+                    self.stage.find_home()
+                    self.is_homed = True
+                    self.stage.get_position() # Update internal state if necessary
+                    
+                    # Update GUI on main thread
+                    self.after(0, lambda: self.microstage_status_var.set("Ready"))
+                    self.after(0, lambda: self.microstage_status_label.config(foreground="green"))
+                    self.after(0, lambda: messagebox.showinfo("Homing Complete", "Stage has been homed. The bottom-right corner is now (0, 0)."))
+                except Exception as e:
+                    self.after(0, lambda: self.microstage_status_var.set("Error"))
+                    self.after(0, lambda: self.microstage_status_label.config(foreground="red"))
+                    self.after(0, lambda: messagebox.showerror("Homing Error", f"An error occurred during homing:\n{e}"))
             
-            self.microstage_status_var.set("Ready")
-            self.microstage_status_label.config(foreground="green")
-            self.microstage_moving_var.set("")
-            self.microstage_moving_label.config(foreground="black")
+            thread = threading.Thread(target=find_home_thread, daemon=True)
+            thread.start()
             
-            messagebox.showinfo("Homing Complete", "Stage has been homed. The bottom-right corner is now (0, 0).")
         except Exception as e:
             self.microstage_status_var.set("Error")
             self.microstage_status_label.config(foreground="red")
-            self.microstage_moving_var.set("ERROR")
-            self.microstage_moving_label.config(foreground="red")
             messagebox.showerror("Homing Error", f"An error occurred during homing:\n{e}")
 
     def _return_to_home(self):
         if not self._check_if_homed(): return
         try:
-            self.microstage_status_var.set("Returning to Home...")
+            self.microstage_status_var.set("MOVING...")
             self.microstage_status_label.config(foreground="orange")
-            self.microstage_moving_var.set("● MOVING")
-            self.microstage_moving_label.config(foreground="red")
+            # Force GUI update to show the status immediately
+            self.update_idletasks()
             
-            self.stage.return_to_home()
+            # Run return to home in background thread
+            def return_home_thread():
+                try:
+                    self.stage.return_to_home()
+                    
+                    # Update GUI on main thread
+                    self.after(0, lambda: self.microstage_status_var.set("Ready"))
+                    self.after(0, lambda: self.microstage_status_label.config(foreground="green"))
+                except Exception as e:
+                    self.after(0, lambda: self.microstage_status_var.set("Error"))
+                    self.after(0, lambda: self.microstage_status_label.config(foreground="red"))
+                    self.after(0, lambda: messagebox.showerror("Return to Home Error", f"An error occurred:\n{e}"))
             
-            self.microstage_status_var.set("Ready")
-            self.microstage_status_label.config(foreground="green")
-            self.microstage_moving_var.set("")
-            self.microstage_moving_label.config(foreground="black")
+            thread = threading.Thread(target=return_home_thread, daemon=True)
+            thread.start()
+            
         except Exception as e:
             self.microstage_status_var.set("Error")
             self.microstage_status_label.config(foreground="red")
-            self.microstage_moving_var.set("ERROR")
-            self.microstage_moving_label.config(foreground="red")
             messagebox.showerror("Return to Home Error", f"An error occurred:\n{e}")
+    
+    def _move_to_center(self):
+        if not self._check_if_homed(): return
+        try:
+            # Calculate center position based on limits
+            center_x = (self.stage.x_min + self.stage.x_max) / 2
+            center_y = (self.stage.y_min + self.stage.y_max) / 2
+            
+            self.microstage_status_var.set("MOVING...")
+            self.microstage_status_label.config(foreground="orange")
+            # Force GUI update to show the status immediately
+            self.update_idletasks()
+            
+            # Update the set position variables to reflect the center
+            self.x_set_var.set(f"{center_x:.2f}")
+            self.y_set_var.set(f"{center_y:.2f}")
+            
+            # Run movement in background thread
+            def move_center():
+                self.stage.move_to(center_x, center_y)
+            
+            self._run_movement_in_thread(move_center)
+            
+        except Exception as e:
+            self.microstage_status_var.set("Error")
+            self.microstage_status_label.config(foreground="red")
+            messagebox.showerror("Move to Center Error", f"An error occurred:\n{e}")
     
     def _set_x_position(self):
         if not self._check_if_homed(): return
@@ -378,12 +438,17 @@ class Qt3MoveApp(tk.Tk):
             current_pos = self.stage.get_position()
             
             # Update status before movement
-            self.microstage_status_var.set("Moving X...")
+            self.microstage_status_var.set("MOVING...")
             self.microstage_status_label.config(foreground="orange")
+            # Force GUI update to show the status immediately
+            self.update_idletasks()
             
-            self.stage.move_to(target_x, current_pos[1])
+            # Run movement in background thread
+            def move_x():
+                self.stage.move_to(target_x, current_pos[1])
             
-            # Status will be updated by the position display loop
+            self._run_movement_in_thread(move_x)
+            
         except ValueError:
             messagebox.showerror("Invalid Input", "Please enter a valid number for the X position.")
         except Exception as e:
@@ -398,12 +463,17 @@ class Qt3MoveApp(tk.Tk):
             current_pos = self.stage.get_position()
             
             # Update status before movement
-            self.microstage_status_var.set("Moving Y...")
+            self.microstage_status_var.set("MOVING...")
             self.microstage_status_label.config(foreground="orange")
+            # Force GUI update to show the status immediately
+            self.update_idletasks()
             
-            self.stage.move_to(current_pos[0], target_y)
+            # Run movement in background thread
+            def move_y():
+                self.stage.move_to(current_pos[0], target_y)
             
-            # Status will be updated by the position display loop
+            self._run_movement_in_thread(move_y)
+            
         except ValueError:
             messagebox.showerror("Invalid Input", "Please enter a valid number for the Y position.")
         except Exception as e:
@@ -466,18 +536,30 @@ class Qt3MoveApp(tk.Tk):
     def _step_move(self, axis, direction):
         if not self._check_if_homed(): return
         try:
+            self.microstage_status_var.set("MOVING...")
+            self.microstage_status_label.config(foreground="orange")
+            self.update_idletasks()
+            
             current_pos = self.stage.get_position()
-            if axis == 'x':
-                step_val = float(self.x_step_var.get())
-                new_target_x = current_pos[0] + (step_val * direction)
-                self.stage.move_to(new_target_x, current_pos[1])
-            elif axis == 'y':
-                step_val = float(self.y_step_var.get())
-                new_target_y = current_pos[1] + (step_val * direction)
-                self.stage.move_to(current_pos[0], new_target_y)
+            
+            # Run movement in background thread
+            def move_step():
+                if axis == 'x':
+                    step_val = float(self.x_step_var.get())
+                    new_target_x = current_pos[0] + (step_val * direction)
+                    self.stage.move_to(new_target_x, current_pos[1])
+                elif axis == 'y':
+                    step_val = float(self.y_step_var.get())
+                    new_target_y = current_pos[1] + (step_val * direction)
+                    self.stage.move_to(current_pos[0], new_target_y)
+            
+            self._run_movement_in_thread(move_step)
+            
         except ValueError:
             messagebox.showerror("Invalid Input", "Please enter a valid number for the Step value.")
         except Exception as e:
+            self.microstage_status_var.set("Error")
+            self.microstage_status_label.config(foreground="red")
             messagebox.showerror("Movement Error", f"An error occurred: {e}")
 
     def _update_position_display(self):
@@ -496,29 +578,37 @@ class Qt3MoveApp(tk.Tk):
         if self.stage:
             try:
                 is_moving = self.stage.is_moving()
+                current_status = self.microstage_status_var.get()
+                
+                # List of special status messages that should be preserved
+                special_statuses = ["HOMING...", "MOVING...", "Error"]
+                
                 if is_moving:
-                    self.microstage_moving_var.set("● MOVING")
-                    self.microstage_moving_label.config(foreground="red")
-                    self.microstage_status_var.set("Moving...")
-                    self.microstage_status_label.config(foreground="orange")
-                    # Update individual axis indicators
-                    self.x_moving_label.config(text="●", foreground="red")
-                    self.y_moving_label.config(text="●", foreground="red")
-                else:
-                    self.microstage_moving_var.set("")
-                    self.microstage_moving_label.config(foreground="black")
-                    if self.is_homed:
-                        self.microstage_status_var.set("Ready")
-                        self.microstage_status_label.config(foreground="green")
-                    else:
-                        self.microstage_status_var.set("Not Homed")
+                    # If we're moving, show moving status unless it's a special preserved status
+                    if current_status not in special_statuses:
+                        self.microstage_status_var.set("MOVING...")
                         self.microstage_status_label.config(foreground="orange")
-                    # Clear individual axis indicators
-                    self.x_moving_label.config(text="", foreground="black")
-                    self.y_moving_label.config(text="", foreground="black")
+                else:
+                    # Movement has stopped - update status to Ready/Not Homed
+                    # But preserve special status messages until they're explicitly changed
+                    if current_status == "MOVING...":
+                        # Movement completed - transition to Ready
+                        if self.is_homed:
+                            self.microstage_status_var.set("Ready")
+                            self.microstage_status_label.config(foreground="green")
+                        else:
+                            self.microstage_status_var.set("Not Homed")
+                            self.microstage_status_label.config(foreground="orange")
+                    elif current_status not in special_statuses:
+                        # Normal status - update to Ready/Not Homed
+                        if self.is_homed:
+                            self.microstage_status_var.set("Ready")
+                            self.microstage_status_label.config(foreground="green")
+                        else:
+                            self.microstage_status_var.set("Not Homed")
+                            self.microstage_status_label.config(foreground="orange")
+                    # If status is "HOMING..." or "Error", preserve it (they handle their own completion)
             except Exception as e:
-                self.microstage_moving_var.set("ERROR")
-                self.microstage_moving_label.config(foreground="red")
                 self.microstage_status_var.set("Error")
                 self.microstage_status_label.config(foreground="red")
                 print(f"Error checking microstage movement status: {e}")
@@ -598,10 +688,18 @@ class Qt3MoveApp(tk.Tk):
         if not self.stage or not self.is_homed:
             return
         try:
+            self.microstage_status_var.set("MOVING...")
+            self.microstage_status_label.config(foreground="orange")
+            self.update_idletasks()
+            
             step = float(self.x_step_var.get())
             current_pos = self.stage.get_position()
             new_x = max(self.stage.x_min, current_pos[0] - step)
-            self.stage.move_to(new_x, current_pos[1])
+            
+            def move_left():
+                self.stage.move_to(new_x, current_pos[1])
+            
+            self._run_movement_in_thread(move_left)
         except ValueError:
             pass
     
@@ -610,10 +708,18 @@ class Qt3MoveApp(tk.Tk):
         if not self.stage or not self.is_homed:
             return
         try:
+            self.microstage_status_var.set("MOVING...")
+            self.microstage_status_label.config(foreground="orange")
+            self.update_idletasks()
+            
             step = float(self.x_step_var.get())
             current_pos = self.stage.get_position()
             new_x = min(self.stage.x_max, current_pos[0] + step)
-            self.stage.move_to(new_x, current_pos[1])
+            
+            def move_right():
+                self.stage.move_to(new_x, current_pos[1])
+            
+            self._run_movement_in_thread(move_right)
         except ValueError:
             pass
     
@@ -622,10 +728,18 @@ class Qt3MoveApp(tk.Tk):
         if not self.stage or not self.is_homed:
             return
         try:
+            self.microstage_status_var.set("MOVING...")
+            self.microstage_status_label.config(foreground="orange")
+            self.update_idletasks()
+            
             step = float(self.y_step_var.get())
             current_pos = self.stage.get_position()
             new_y = min(self.stage.y_max, current_pos[1] + step)
-            self.stage.move_to(current_pos[0], new_y)
+            
+            def move_up():
+                self.stage.move_to(current_pos[0], new_y)
+            
+            self._run_movement_in_thread(move_up)
         except ValueError:
             pass
     
@@ -634,10 +748,18 @@ class Qt3MoveApp(tk.Tk):
         if not self.stage or not self.is_homed:
             return
         try:
+            self.microstage_status_var.set("MOVING...")
+            self.microstage_status_label.config(foreground="orange")
+            self.update_idletasks()
+            
             step = float(self.y_step_var.get())
             current_pos = self.stage.get_position()
             new_y = max(self.stage.y_min, current_pos[1] - step)
-            self.stage.move_to(current_pos[0], new_y)
+            
+            def move_down():
+                self.stage.move_to(current_pos[0], new_y)
+            
+            self._run_movement_in_thread(move_down)
         except ValueError:
             pass
     
