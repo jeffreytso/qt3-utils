@@ -8,6 +8,49 @@ from microstage.encoderless_wrapper import EncoderlessMicrostage
 from piezo.nidaq_position import NidaqPositionController
 
 CONFIG_FILE = 'qt3move_base.yaml'
+
+# --- Tooltip Class ---
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tooltip_window = None
+        self.widget.bind("<Enter>", self.on_enter)
+        self.widget.bind("<Leave>", self.on_leave)
+        self.widget.bind("<Motion>", self.on_motion)
+    
+    def on_enter(self, event=None):
+        self.show_tooltip(event)
+    
+    def on_motion(self, event=None):
+        if self.tooltip_window:
+            self.show_tooltip(event)
+    
+    def show_tooltip(self, event=None):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+        
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() + 5
+        y = self.widget.winfo_rooty() + 5
+        
+        self.tooltip_window = tk.Toplevel(self.widget)
+        self.tooltip_window.wm_overrideredirect(True)
+        self.tooltip_window.wm_geometry(f"+{x}+{y}")
+        
+        label = tk.Label(self.tooltip_window, text=self.text, 
+                       background="yellow", foreground="black",
+                       relief="solid", borderwidth=1, padx=5, pady=3,
+                       font=("Arial", 9), wraplength=200)
+        label.pack()
+    
+    def on_leave(self, event=None):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+    
+    def update_text(self, new_text):
+        self.text = new_text
+
 # --- Main Application ---
 class Qt3MoveApp(tk.Tk):
     def __init__(self, config_file=None):
@@ -60,11 +103,12 @@ class Qt3MoveApp(tk.Tk):
         # Microstage variables
         self.x_set_var = tk.StringVar(value="0.0")
         self.y_set_var = tk.StringVar(value="0.0")
-        self.x_step_var = tk.StringVar(value="1.0")
-        self.y_step_var = tk.StringVar(value="1.0")
+        self.step_var = tk.StringVar(value="1.0")
+        self.step_axis_var = tk.StringVar(value="X")
         self.x_current_var = tk.StringVar(value="--")
         self.y_current_var = tk.StringVar(value="--")
         self.is_homed = False
+        self.stepping_warning_shown = False
         
         # Movement indicator variables
         self.microstage_status_var = tk.StringVar(value="Ready")
@@ -188,7 +232,10 @@ class Qt3MoveApp(tk.Tk):
         setup_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         setup_frame.columnconfigure((0, 1, 2), weight=1)
         
-        ttk.Button(setup_frame, text="Find Home (Set 0,0)", command=self._find_home).grid(row=0, column=0, padx=5, sticky="ew")
+        find_home_button = ttk.Button(setup_frame, text="Calibrate Stage", command=self._find_home)
+        find_home_button.grid(row=0, column=0, padx=5, sticky="ew")
+        ToolTip(find_home_button, "Calibrate Stage: Sets the origin (0,0) at the bottom-right corner. Maximum position (top-left corner) is (12000, 12000). Positive X is to the left, positive Y is upward.")
+        
         ttk.Button(setup_frame, text="Return to Home", command=self._return_to_home).grid(row=0, column=1, padx=5, sticky="ew")
         ttk.Button(setup_frame, text="Move to Center", command=self._move_to_center).grid(row=0, column=2, padx=5, sticky="ew")
 
@@ -216,6 +263,10 @@ class Qt3MoveApp(tk.Tk):
         ttk.Label(control_frame, text="Microstage:").grid(row=3, column=0, sticky="w", padx=5, pady=(10,0))
         self.microstage_status_label = ttk.Label(control_frame, textvariable=self.microstage_status_var, width=20, relief="sunken", anchor="center")
         self.microstage_status_label.grid(row=3, column=1, columnspan=2, padx=5, pady=(10,0))
+        
+        # Create tooltip for status label - will update based on status
+        self.microstage_status_tooltip = ToolTip(self.microstage_status_label, 
+                                                  "Status: Ready")
 
         # --- Stepping Control Frame ---
         stepping_frame = ttk.LabelFrame(main_frame, text="Stepping Control", padding="10")
@@ -237,10 +288,22 @@ class Qt3MoveApp(tk.Tk):
         self.microstage_stepping_frame = ttk.Frame(stepping_frame)
         self.microstage_stepping_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         
-        ttk.Label(self.microstage_stepping_frame, text="Microstage X Step (µm):").grid(row=0, column=0, sticky="w", padx=5)
-        ttk.Entry(self.microstage_stepping_frame, textvariable=self.x_step_var, width=10).grid(row=0, column=1, padx=5)
-        ttk.Label(self.microstage_stepping_frame, text="Microstage Y Step (µm):").grid(row=1, column=0, sticky="w", padx=5, pady=(5,0))
-        ttk.Entry(self.microstage_stepping_frame, textvariable=self.y_step_var, width=10).grid(row=1, column=1, padx=5, pady=(5,0))
+        ttk.Label(self.microstage_stepping_frame, text="Step (µm):").grid(row=0, column=0, sticky="w", padx=5)
+        ttk.Entry(self.microstage_stepping_frame, textvariable=self.step_var, width=10).grid(row=0, column=1, padx=5)
+        
+        ttk.Label(self.microstage_stepping_frame, text="Axis:").grid(row=0, column=2, sticky="w", padx=(10, 5))
+        step_axis_combo = ttk.Combobox(
+            self.microstage_stepping_frame,
+            textvariable=self.step_axis_var,
+            values=["X", "-X", "Y", "-Y"],
+            state="readonly",
+            width=5
+        )
+        step_axis_combo.grid(row=0, column=3, padx=5)
+        
+        step_button = ttk.Button(self.microstage_stepping_frame, text="Step", command=self._step_microstage_button)
+        step_button.grid(row=0, column=4, padx=(10, 5))
+        ToolTip(step_button, "Step: Moves the microstage by the specified step value in the selected direction. You can also use arrow keys to step when stepping is enabled.")
         
         # Piezo stepping controls
         self.piezo_stepping_frame = ttk.Frame(stepping_frame)
@@ -316,9 +379,18 @@ class Qt3MoveApp(tk.Tk):
     def _check_if_homed(self, show_warning=True):
         if not self.is_homed:
             if show_warning:
-                messagebox.showwarning("Homing Required", "Please run the 'Find Home' sequence first to calibrate the stage position.")
+                messagebox.showwarning("Calibration Required", "Please run 'Calibrate Stage' first to calibrate the stage position.")
             return False
         return True
+    
+    def _show_stepping_warning(self):
+        """Show one-time warning about stepping without calibrating"""
+        if not self.stepping_warning_shown and not self.is_homed:
+            messagebox.showwarning(
+                "Stepping Without Calibrating",
+                "Warning: Stepping without calibrating the stage position may allow movement outside the safe limits (12000, 12000) and could cause hardware collisions. Proceed with caution."
+            )
+            self.stepping_warning_shown = True
     
     def _run_movement_in_thread(self, movement_func, *args, **kwargs):
         """Run a movement function in a background thread to keep GUI responsive"""
@@ -361,11 +433,11 @@ class Qt3MoveApp(tk.Tk):
                     # Update GUI on main thread
                     self.after(0, lambda: self.microstage_status_var.set("Ready"))
                     self.after(0, lambda: self.microstage_status_label.config(foreground="green"))
-                    self.after(0, lambda: messagebox.showinfo("Homing Complete", "Stage has been homed. The bottom-right corner is now (0, 0)."))
+                    self.after(0, lambda: messagebox.showinfo("Calibration Complete", "Stage has been calibrated. The bottom-right corner is now (0, 0)."))
                 except Exception as e:
                     self.after(0, lambda: self.microstage_status_var.set("Error"))
                     self.after(0, lambda: self.microstage_status_label.config(foreground="red"))
-                    self.after(0, lambda: messagebox.showerror("Homing Error", f"An error occurred during homing:\n{e}"))
+                    self.after(0, lambda: messagebox.showerror("Calibration Error", f"An error occurred during calibration:\n{e}"))
             
             thread = threading.Thread(target=find_home_thread, daemon=True)
             thread.start()
@@ -373,7 +445,7 @@ class Qt3MoveApp(tk.Tk):
         except Exception as e:
             self.microstage_status_var.set("Error")
             self.microstage_status_label.config(foreground="red")
-            messagebox.showerror("Homing Error", f"An error occurred during homing:\n{e}")
+            messagebox.showerror("Calibration Error", f"An error occurred during calibration:\n{e}")
 
     def _return_to_home(self):
         if not self._check_if_homed(): return
@@ -534,29 +606,86 @@ class Qt3MoveApp(tk.Tk):
             self._step_move(axis, direction)
 
     def _step_move(self, axis, direction):
-        if not self._check_if_homed(): return
+        if not self.stage:
+            return
+        
+        # Show one-time warning if not homed
+        self._show_stepping_warning()
+        
         try:
             self.microstage_status_var.set("MOVING...")
             self.microstage_status_label.config(foreground="orange")
             self.update_idletasks()
             
             current_pos = self.stage.get_position()
+            step_val = abs(float(self.step_var.get()))  # Only use positive values, direction handled by arrow key
             
             # Run movement in background thread
             def move_step():
                 if axis == 'x':
-                    step_val = float(self.x_step_var.get())
                     new_target_x = current_pos[0] + (step_val * direction)
+                    if self.is_homed:
+                        new_target_x = max(self.stage.x_min, min(self.stage.x_max, new_target_x))
                     self.stage.move_to(new_target_x, current_pos[1])
                 elif axis == 'y':
-                    step_val = float(self.y_step_var.get())
                     new_target_y = current_pos[1] + (step_val * direction)
+                    if self.is_homed:
+                        new_target_y = max(self.stage.y_min, min(self.stage.y_max, new_target_y))
                     self.stage.move_to(current_pos[0], new_target_y)
             
             self._run_movement_in_thread(move_step)
             
         except ValueError:
-            messagebox.showerror("Invalid Input", "Please enter a valid number for the Step value.")
+            messagebox.showerror("Invalid Input", "Please enter a valid positive number for the Step value.")
+        except Exception as e:
+            self.microstage_status_var.set("Error")
+            self.microstage_status_label.config(foreground="red")
+            messagebox.showerror("Movement Error", f"An error occurred: {e}")
+    
+    def _step_microstage_button(self):
+        """Step microstage using the Step button"""
+        if not self.stage:
+            return
+        
+        # Show one-time warning if not homed
+        self._show_stepping_warning()
+        
+        try:
+            self.microstage_status_var.set("MOVING...")
+            self.microstage_status_label.config(foreground="orange")
+            self.update_idletasks()
+            
+            step_val = abs(float(self.step_var.get()))  # Only allow positive values
+            axis = self.step_axis_var.get()  # "X", "-X", "Y", or "-Y"
+            current_pos = self.stage.get_position()
+            
+            # Run movement in background thread
+            def move_step():
+                if axis == "X":
+                    new_x = current_pos[0] + step_val
+                    if self.is_homed:
+                        new_x = max(self.stage.x_min, min(self.stage.x_max, new_x))
+                    self.stage.move_to(new_x, current_pos[1])
+                elif axis == "-X":
+                    new_x = current_pos[0] - step_val
+                    if self.is_homed:
+                        new_x = max(self.stage.x_min, min(self.stage.x_max, new_x))
+                    self.stage.move_to(new_x, current_pos[1])
+                elif axis == "Y":
+                    new_y = current_pos[1] + step_val
+                    if self.is_homed:
+                        new_y = max(self.stage.y_min, min(self.stage.y_max, new_y))
+                    self.stage.move_to(current_pos[0], new_y)
+                elif axis == "-Y":
+                    new_y = current_pos[1] - step_val
+                    if self.is_homed:
+                        new_y = max(self.stage.y_min, min(self.stage.y_max, new_y))
+                    self.stage.move_to(current_pos[0], new_y)
+            
+            self._run_movement_in_thread(move_step)
+            
+        except ValueError:
+            messagebox.showerror("Invalid Input", "Please enter a valid positive number for the Step value.")
         except Exception as e:
             self.microstage_status_var.set("Error")
             self.microstage_status_label.config(foreground="red")
@@ -582,6 +711,20 @@ class Qt3MoveApp(tk.Tk):
                 
                 # List of special status messages that should be preserved
                 special_statuses = ["HOMING...", "MOVING...", "Error"]
+                
+                # Update tooltip text based on status
+                if current_status == "HOMING...":
+                    self.microstage_status_tooltip.update_text("Warning: Attempting to move the stage while it is already moving might cause unexpected behavior!")
+                elif current_status == "MOVING...":
+                    self.microstage_status_tooltip.update_text("Warning: Attempting to move the stage while it is already moving might cause unexpected behavior!")
+                elif current_status == "Ready":
+                    self.microstage_status_tooltip.update_text("Status: Ready - The stage is ready for movement commands.")
+                elif current_status == "Not Homed":
+                    self.microstage_status_tooltip.update_text("Status: Not Homed - Please run 'Calibrate Stage' to calibrate the stage position.")
+                elif current_status == "Error":
+                    self.microstage_status_tooltip.update_text("Status: Error - An error has occurred. Check the error message for details.")
+                else:
+                    self.microstage_status_tooltip.update_text(f"Status: {current_status}")
                 
                 if is_moving:
                     # If we're moving, show moving status unless it's a special preserved status
@@ -684,17 +827,23 @@ class Qt3MoveApp(tk.Tk):
             print("Stepping disabled")
     
     def _step_microstage_left(self, event):
-        """Step microstage left"""
-        if not self.stage or not self.is_homed:
+        """Step microstage left (negative X direction)"""
+        if not self.stage:
             return
+        
+        # Show one-time warning if not homed
+        self._show_stepping_warning()
+        
         try:
             self.microstage_status_var.set("MOVING...")
             self.microstage_status_label.config(foreground="orange")
             self.update_idletasks()
             
-            step = float(self.x_step_var.get())
+            step = abs(float(self.step_var.get()))
             current_pos = self.stage.get_position()
-            new_x = max(self.stage.x_min, current_pos[0] - step)
+            new_x = current_pos[0] - step
+            if self.is_homed:
+                new_x = max(self.stage.x_min, new_x)
             
             def move_left():
                 self.stage.move_to(new_x, current_pos[1])
@@ -704,17 +853,23 @@ class Qt3MoveApp(tk.Tk):
             pass
     
     def _step_microstage_right(self, event):
-        """Step microstage right"""
-        if not self.stage or not self.is_homed:
+        """Step microstage right (positive X direction)"""
+        if not self.stage:
             return
+        
+        # Show one-time warning if not homed
+        self._show_stepping_warning()
+        
         try:
             self.microstage_status_var.set("MOVING...")
             self.microstage_status_label.config(foreground="orange")
             self.update_idletasks()
             
-            step = float(self.x_step_var.get())
+            step = abs(float(self.step_var.get()))
             current_pos = self.stage.get_position()
-            new_x = min(self.stage.x_max, current_pos[0] + step)
+            new_x = current_pos[0] + step
+            if self.is_homed:
+                new_x = min(self.stage.x_max, new_x)
             
             def move_right():
                 self.stage.move_to(new_x, current_pos[1])
@@ -724,17 +879,23 @@ class Qt3MoveApp(tk.Tk):
             pass
     
     def _step_microstage_up(self, event):
-        """Step microstage up"""
-        if not self.stage or not self.is_homed:
+        """Step microstage up (positive Y direction)"""
+        if not self.stage:
             return
+        
+        # Show one-time warning if not homed
+        self._show_stepping_warning()
+        
         try:
             self.microstage_status_var.set("MOVING...")
             self.microstage_status_label.config(foreground="orange")
             self.update_idletasks()
             
-            step = float(self.y_step_var.get())
+            step = abs(float(self.step_var.get()))
             current_pos = self.stage.get_position()
-            new_y = min(self.stage.y_max, current_pos[1] + step)
+            new_y = current_pos[1] + step
+            if self.is_homed:
+                new_y = min(self.stage.y_max, new_y)
             
             def move_up():
                 self.stage.move_to(current_pos[0], new_y)
@@ -744,17 +905,23 @@ class Qt3MoveApp(tk.Tk):
             pass
     
     def _step_microstage_down(self, event):
-        """Step microstage down"""
-        if not self.stage or not self.is_homed:
+        """Step microstage down (negative Y direction)"""
+        if not self.stage:
             return
+        
+        # Show one-time warning if not homed
+        self._show_stepping_warning()
+        
         try:
             self.microstage_status_var.set("MOVING...")
             self.microstage_status_label.config(foreground="orange")
             self.update_idletasks()
             
-            step = float(self.y_step_var.get())
+            step = abs(float(self.step_var.get()))
             current_pos = self.stage.get_position()
-            new_y = max(self.stage.y_min, current_pos[1] - step)
+            new_y = current_pos[1] - step
+            if self.is_homed:
+                new_y = max(self.stage.y_min, new_y)
             
             def move_down():
                 self.stage.move_to(current_pos[0], new_y)
