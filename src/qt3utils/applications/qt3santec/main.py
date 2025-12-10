@@ -108,6 +108,42 @@ class SantecController:
         inst.write(f":WAV {target_nm}")
         if inst.query(":POW:STAT?").strip() == "0": inst.write(":POW:STAT 1")
 
+    def set_power(self, power_value):
+        """Set the optical output power level.
+        
+        Args:
+            power_value: Power level in dBm (range: -15 to +13 dBm)
+        
+        Raises:
+            ValueError: If power value is out of valid range
+            RuntimeError: If no laser is available
+        """
+        if not self.lasers:
+            raise RuntimeError("No lasers connected.")
+        
+        # Validate power range: -15dBm to +13dBm
+        if power_value < -15.0 or power_value > 13.0:
+            raise ValueError(f"Power must be between -15 and +13 dBm. Got {power_value} dBm.")
+        
+        # Use active laser if available, otherwise use first laser
+        if self.active_laser:
+            inst = self.active_laser['obj']
+        else:
+            # If no active laser, use first available laser
+            inst = self.lasers[0]['obj']
+            # Switch to this laser
+            if self.switch:
+                self.switch.write(f"CH {self.lasers[0]['port']}")
+                time.sleep(0.2)
+            self.active_laser = self.lasers[0]
+        
+        # Set power using Legacy mode command :POW
+        inst.write(f":POW {power_value}")
+        
+        # Ensure power is on
+        if inst.query(":POW:STAT?").strip() == "0":
+            inst.write(":POW:STAT 1")
+
     def check_continuous_range(self, start_nm, end_nm):
         """Check if start and end wavelengths are within a single laser's range.
         Returns the laser object if valid, None otherwise."""
@@ -225,6 +261,12 @@ class LaserSweepApp:
         self.ent_manual_wav.pack(side="left", padx=5)
         self.btn_set_manual = tk.Button(manual_frame, text="Set", command=self.set_manual_wavelength, state="disabled")
         self.btn_set_manual.pack(side="left", padx=5)
+        
+        tk.Label(manual_frame, text="Set Power (dBm):").pack(side="left", padx=5)
+        self.ent_manual_power = tk.Entry(manual_frame, width=10)
+        self.ent_manual_power.pack(side="left", padx=5)
+        self.btn_set_power = tk.Button(manual_frame, text="Set Power", command=self.set_manual_power, state="disabled")
+        self.btn_set_power.pack(side="left", padx=5)
 
         # Sweep Type Selection
         sweep_type_frame = tk.Frame(self.root)
@@ -387,6 +429,7 @@ class LaserSweepApp:
             self.lbl_status.config(text=msg, fg="green")
             self.btn_connect.config(state="disabled")
             self.btn_set_manual.config(state="normal")
+            self.btn_set_power.config(state="normal")
             self.btn_start.config(state="normal")
             
             # Populate laser dropdown for continuous sweep
@@ -405,6 +448,16 @@ class LaserSweepApp:
             val = float(self.ent_manual_wav.get())
             self.ctrl.set_wavelength(val)
             self.log(f"Manual Set: {val} nm")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def set_manual_power(self):
+        try:
+            val = float(self.ent_manual_power.get())
+            self.ctrl.set_power(val)
+            self.log(f"Manual Set Power: {val} dBm")
+        except ValueError as e:
+            messagebox.showerror("Error", str(e))
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
