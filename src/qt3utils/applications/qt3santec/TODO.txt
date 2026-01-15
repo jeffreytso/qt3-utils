@@ -1,0 +1,4 @@
+1. Potential issues with graph jumping when initializing wavelength values
+2. Check heat map is working
+3. Get continuous sweep to stop being buggy
+4. Figure out why down sweeping doesn't change the voltage at all
