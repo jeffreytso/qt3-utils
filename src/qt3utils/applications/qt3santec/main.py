@@ -236,6 +236,7 @@ class SantecController:
                     inst.read_termination = '\r'
                     inst.timeout = 3000
                     inst.write(":SYST:COMM:COD 0") # Force Legacy Mode
+                    inst.write(":POW:ATT:AUT 1") # Force auto power control mode
                     
                     idn = inst.query("*IDN?").strip()
                     min_wav = float(inst.query(":WAV:MIN?"))
@@ -883,9 +884,12 @@ class LaserSweepApp:
             self.viz_ax.set_title(f'{detector_name} - Heat Map')
             return
         
-        # Create heat map: x-axis = scan number, y-axis = voltage bins
-        voltages = np.array(data['voltages'])
-        scans = np.array(data['scans'])
+        # Use consistent length (guard against race where sweep thread appends mid-read)
+        n = min(len(data['voltages']), len(data['scans']))
+        if n == 0:
+            return
+        voltages = np.array(data['voltages'][:n])
+        scans = np.array(data['scans'][:n])
         
         if len(voltages) == 0:
             self.viz_ax.text(0.5, 0.5, 'No data collected yet', 
@@ -969,9 +973,19 @@ class LaserSweepApp:
             self.viz_ax.set_title(f'{detector_name} - Wavelength Graph')
             return
         
-        wavelengths = np.array(data['wavelengths'])
-        voltages = np.array(data['voltages'])
-        
+        # Use consistent length (guard against race where sweep thread appends mid-read)
+        n = min(len(data['wavelengths']), len(data['voltages']), len(data['scans']), len(data['timestamps']))
+        if n == 0:
+            self.viz_ax.text(0.5, 0.5, 'No valid data',
+                           ha='center', va='center', transform=self.viz_ax.transAxes)
+            self.viz_ax.set_xlabel('Wavelength (nm)')
+            self.viz_ax.set_ylabel('Voltage (V)')
+            self.viz_ax.set_title(f'{detector_name} - Wavelength Graph')
+            return
+        wavelengths = np.array(data['wavelengths'][:n])
+        voltages = np.array(data['voltages'][:n])
+        scans_full = np.array(data['scans'][:n])
+
         # Filter out invalid data
         valid_mask = np.isfinite(wavelengths) & np.isfinite(voltages)
         if np.sum(valid_mask) == 0:
@@ -984,7 +998,7 @@ class LaserSweepApp:
         
         wavelengths = wavelengths[valid_mask]
         voltages = voltages[valid_mask]
-        scans = np.array(data['scans'])[valid_mask]
+        scans = scans_full[valid_mask]
         
         # Apply user-specified bounds or use data range
         wl_min_data, wl_max_data = np.min(wavelengths), np.max(wavelengths)
@@ -1002,19 +1016,41 @@ class LaserSweepApp:
         filtered_voltages = voltages[bound_mask]
         filtered_scans = scans[bound_mask]
         
-        # Plot line graph - plot each scan separately to avoid connecting lines between scans
+        # Plot line graph - plot each scan separately and break at wavelength discontinuities
+        # so we never connect across sweep boundaries (even if scan tags are slightly wrong)
         if len(filtered_wavelengths) > 0:
-            # Get unique scan numbers
             unique_scans = np.unique(filtered_scans)
-            
-            # Plot each scan as a separate line segment
+            wl_range = wl_max - wl_min
+            # Break line only at sweep boundaries (discontinuity larger than this)
+            gap_threshold = max(0.5, 0.15 * wl_range)
+
             for scan_num in unique_scans:
                 scan_mask = filtered_scans == scan_num
-                scan_wl = filtered_wavelengths[scan_mask]
-                scan_v = filtered_voltages[scan_mask]
-                
-                if len(scan_wl) > 0:
+                scan_wl = np.asarray(filtered_wavelengths[scan_mask])
+                scan_v = np.asarray(filtered_voltages[scan_mask])
+
+                if len(scan_wl) == 0:
+                    continue
+                if len(scan_wl) == 1:
                     self.viz_ax.plot(scan_wl, scan_v, 'b-', linewidth=0.5, alpha=0.7)
+                    continue
+
+                # Insert NaN only at sweep boundaries (large discontinuity), not on smooth downsweeps.
+                # Break when |dwl| > gap_threshold: large forward jump (new sweep) or large backward jump (turn-around).
+                # Do NOT break on small negative dwl (smooth high->low sweep) so downsweeps draw as lines.
+                wl_plot = []
+                v_plot = []
+                for i in range(len(scan_wl)):
+                    wl_plot.append(scan_wl[i])
+                    v_plot.append(scan_v[i])
+                    if i < len(scan_wl) - 1:
+                        dwl = scan_wl[i + 1] - scan_wl[i]
+                        if abs(dwl) > gap_threshold:
+                            wl_plot.append(np.nan)
+                            v_plot.append(np.nan)
+                wl_plot = np.array(wl_plot)
+                v_plot = np.array(v_plot)
+                self.viz_ax.plot(wl_plot, v_plot, 'b-', linewidth=0.5, alpha=0.7)
         else:
             self.viz_ax.text(0.5, 0.5, 'No data in specified range', 
                            ha='center', va='center', transform=self.viz_ax.transAxes)
@@ -1312,7 +1348,19 @@ class LaserSweepApp:
             self.ctrl.start_repeat_sweep(p['laser'])
             self.log("Repeat scan started.")
             time.sleep(0.2)  # Brief pause to allow sweep to start
-            
+
+            # Time-based throttle for visualization updates (e.g. ~20 FPS max)
+            viz_interval_s = 0.05  # 50 ms between redraws
+            last_viz_time = 0.0
+            first_stored_logged = True
+            start_aligned = True
+            last_stored_ts_current_scan = None  # O(1) completion check: avoid scanning full detector_data each iteration
+            last_stored_wl_current_scan = None
+            # Debounce + time-gate: laser reports status=0 at two-way turn-around; only complete after full cycle
+            poll_interval_s = 0.01
+            status_0_debounce_count = 0
+            status_0_required = max(5, int(0.2 / poll_interval_s))  # ~0.2 s of status=0
+
             # Monitor sweep and count completed scans
             while completed_scans < p['scans']:
                 if self.stop_flag:
@@ -1323,65 +1371,129 @@ class LaserSweepApp:
                 
                 # Track when sweep is running
                 if status == 1:  # Running
+                    status_0_debounce_count = 0
                     if not sweep_running:
                         sweep_running = True
                         scan_start_time = time.time()
                         if sweep_start_time is None:
                             sweep_start_time = scan_start_time
                         self.current_scan = completed_scans + 1
+                        first_stored_logged = False
+                        start_aligned = False
+                        last_stored_ts_current_scan = None
+                        last_stored_wl_current_scan = None
                 
                 # Read continuous samples and correlate with wavelength
                 if self.detector_ctrl and self.detector_ctrl.continuous_running:
                     try:
                         samples1, samples2, timestamps = self.detector_ctrl.read_continuous_samples()
-                        if samples1 is not None and len(samples1) > 0:
-                            # Calculate wavelengths based on time elapsed
+                        if samples1 is not None and len(samples1) > 0 and scan_start_time is not None:
                             for i, ts in enumerate(timestamps):
-                                if scan_start_time is not None:
+                                elapsed = ts - scan_start_time
+                                # Skip pre-start buffer (fixes scan 2 wrong first point and negative elapsed)
+                                if elapsed < 0:
+                                    continue
+                                
+                                # Align clock to first stored sample so first point is at start wavelength
+                                if not start_aligned:
+                                    scan_start_time = ts
+                                    elapsed = 0.0
+                                    start_aligned = True
+                                    wavelength = p['start']
+                                    if not first_stored_logged:
+                                        print(f"[DIAG start] scan={self.current_scan} first_stored: ts={ts:.4f} elapsed=0 (aligned) wl={wavelength:.4f}")
+                                        first_stored_logged = True
+                                else:
                                     elapsed = ts - scan_start_time
-                                    
-                                    # Calculate wavelength based on sweep direction and elapsed time
                                     if p['mode'] == 1:  # One-way
-                                        # Simple linear sweep from start to end
                                         if elapsed <= sweep_duration:
                                             wavelength = p['start'] + (elapsed / sweep_duration) * wavelength_range
                                         else:
-                                            wavelength = p['end']  # At end
+                                            wavelength = p['end']
                                     else:  # Two-way
-                                        # Two-way sweep: start -> end -> start
                                         cycle_time = 2 * sweep_duration
-                                        cycle_pos = (elapsed % cycle_time) / cycle_time
-                                        if cycle_pos < 0.5:
-                                            # Going up: start to end
-                                            wavelength = p['start'] + (cycle_pos * 2) * wavelength_range
+                                        if elapsed >= cycle_time:
+                                            # Past one full cycle: hold at start (avoid wrap giving 1300→1302 bump)
+                                            wavelength = p['start']
                                         else:
-                                            # Going down: end to start
-                                            wavelength = p['end'] - ((cycle_pos - 0.5) * 2) * wavelength_range
-                                    
-                                    # Store data for both detectors
-                                    self.detector_data['PDA50B2']['voltages'].append(float(samples1[i]))
-                                    self.detector_data['PDA50B2']['wavelengths'].append(wavelength)
-                                    self.detector_data['PDA50B2']['scans'].append(self.current_scan)
-                                    self.detector_data['PDA50B2']['timestamps'].append(ts)
-                                    
-                                    self.detector_data['PDA10CS2']['voltages'].append(float(samples2[i]))
-                                    self.detector_data['PDA10CS2']['wavelengths'].append(wavelength)
-                                    self.detector_data['PDA10CS2']['scans'].append(self.current_scan)
-                                    self.detector_data['PDA10CS2']['timestamps'].append(ts)
+                                            cycle_pos = elapsed / cycle_time
+                                            if cycle_pos < 0.5:
+                                                wavelength = p['start'] + (cycle_pos * 2) * wavelength_range
+                                            else:
+                                                wavelength = p['end'] - ((cycle_pos - 0.5) * 2) * wavelength_range
+                                    if not first_stored_logged:
+                                        print(f"[DIAG start] scan={self.current_scan} first_stored: ts={ts:.4f} elapsed={elapsed:.4f}s wl={wavelength:.4f}")
+                                        first_stored_logged = True
+                                
+                                # Store data for both detectors
+                                self.detector_data['PDA50B2']['voltages'].append(float(samples1[i]))
+                                self.detector_data['PDA50B2']['wavelengths'].append(wavelength)
+                                self.detector_data['PDA50B2']['scans'].append(self.current_scan)
+                                self.detector_data['PDA50B2']['timestamps'].append(ts)
+                                last_stored_ts_current_scan = ts
+                                last_stored_wl_current_scan = wavelength
+                                
+                                self.detector_data['PDA10CS2']['voltages'].append(float(samples2[i]))
+                                self.detector_data['PDA10CS2']['wavelengths'].append(wavelength)
+                                self.detector_data['PDA10CS2']['scans'].append(self.current_scan)
+                                self.detector_data['PDA10CS2']['timestamps'].append(ts)
                             
-                            # Update visualization periodically (every 1000 samples)
-                            if len(self.detector_data['PDA50B2']['voltages']) % 1000 < len(samples1):
+                            # Update visualization at most every viz_interval_s (time-based throttle)
+                            now = time.time()
+                            if now - last_viz_time >= viz_interval_s:
+                                last_viz_time = now
                                 self.root.after(0, self._update_visualization)
                     except Exception as e:
                         # Silently handle read errors during continuous sampling
                         pass
                 
-                # Detect when a scan completes (status transitions from Running to Stopped)
-                if status == 0 and sweep_running:
+                # Debounce: only count consecutive status=0
+                if status == 0:
+                    status_0_debounce_count += 1
+                else:
+                    status_0_debounce_count = 0
+
+                elapsed_s = (time.time() - scan_start_time) if scan_start_time is not None else 0.0
+                expected_cycle_s = 2 * sweep_duration if p['mode'] != 1 else sweep_duration
+                min_elapsed_for_complete = (1.02 * expected_cycle_s) if p['mode'] != 1 else 0.0
+
+                # Two-way: gate completion on *data* time (last stored sample). Use O(1) tracked values.
+                wl_near_start_ok = True
+                elapsed_data_s = elapsed_s
+                if p['mode'] != 1 and sweep_running and scan_start_time is not None:
+                    if last_stored_ts_current_scan is not None and last_stored_wl_current_scan is not None:
+                        elapsed_data_s = last_stored_ts_current_scan - scan_start_time
+                        wl_span = abs(p['end'] - p['start'])
+                        wl_near_start_ok = last_stored_wl_current_scan <= p['start'] + 0.15 * wl_span if wl_span > 0 else True
+                    else:
+                        wl_near_start_ok = False
+                        elapsed_data_s = 0.0
+                    if elapsed_s >= 1.15 * expected_cycle_s:
+                        wl_near_start_ok = True  # wall-clock fallback to avoid stuck
+
+                elapsed_ok = elapsed_data_s >= min_elapsed_for_complete
+                force_complete = sweep_running and elapsed_data_s >= (1.02 * expected_cycle_s)
+
+                # Only declare complete when status=0 for debounce period AND (two-way) elapsed >= full cycle AND last wl near start
+                if ((status == 0 and sweep_running and status_0_debounce_count >= status_0_required and elapsed_ok) or force_complete) and wl_near_start_ok:
                     completed_scans += 1
+                    # Diagnostic: last stored sample + timing
+                    det = 'PDA50B2'
+                    wl_arr = np.array(self.detector_data[det]['wavelengths'])
+                    sc_arr = np.array(self.detector_data[det]['scans'])
+                    ts_arr = np.array(self.detector_data[det]['timestamps'])
+                    mask = (sc_arr == completed_scans)
+                    n_pts = int(np.sum(mask))
+                    if n_pts > 0:
+                        last_idx = np.where(mask)[0][-1]
+                        last_wl = float(wl_arr[last_idx])
+                        print(f"[DIAG end] scan={completed_scans}  points={n_pts}  last_stored_wl={last_wl:.4f}  elapsed_since_start={elapsed_s:.3f}s  expected_cycle_s={expected_cycle_s:.3f}")
+                    else:
+                        print(f"[DIAG end] scan={completed_scans}  points=0  elapsed_since_start={elapsed_s:.3f}s  expected_cycle_s={expected_cycle_s:.3f}")
                     self.log(f"Scan {completed_scans}/{p['scans']} completed.")
                     sweep_running = False
                     scan_start_time = None
+                    status_0_debounce_count = 0
                     
                     # If we've completed all scans, stop
                     if completed_scans >= p['scans']:

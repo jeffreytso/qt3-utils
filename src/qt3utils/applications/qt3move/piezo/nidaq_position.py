@@ -86,6 +86,7 @@ class NidaqPositionController(NidaqVoltageController):
         self.max_position = max_position
         self.settling_time_in_seconds = move_settle_time
         self.invert_axis = invert_axis
+        self._last_position_microns = None  # Display shows this; MON ignored for display
 
         # Invert the axis if specified by self.modifying scale_microns_per_volt
         # and self.zero_microns_volt_offset.
@@ -185,21 +186,25 @@ class NidaqPositionController(NidaqVoltageController):
         self.min_voltage = voltage_limits[0]
         self.max_voltage = voltage_limits[1]
 
+    def has_last_position(self) -> bool:
+        '''True if the user has set a position at least once (so "Current" is known).'''
+        return self._last_position_microns is not None
+
     def get_current_position(self) -> float:
         '''
-        This method gets the current position in microns
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        float
-            Current position in microns
+        Returns the last commanded position (µm) for display. MON is not used so
+        the GUI "Current" matches the value you set. Before any move, falls back
+        to voltage-derived position (MON or last write) if available.
         '''
-        return self._volts_to_microns(self.get_current_voltage())
-    
+        if self._last_position_microns is not None:
+            return self._last_position_microns
+        # Before any Set Position: use voltage-derived position (MON or last write)
+        try:
+            v = self.get_current_voltage()
+            return self._volts_to_microns(v)
+        except Exception:
+            return self.min_position if self.min_position is not None else 0.0
+
     def go_to_position(self, position: float) -> float:
         '''
         This method the positioner to the requested position in microns
@@ -219,8 +224,8 @@ class NidaqPositionController(NidaqVoltageController):
             If requested position corresponds to voltages outside of range.
         '''
         self.go_to_voltage(self._microns_to_volts(position))
-        self.last_write_value = position
-    
+        self._last_position_microns = position
+
     def step_position(self, dx: float=None) -> None:
         '''
         Steps the position of the positioner by dx
@@ -239,13 +244,13 @@ class NidaqPositionController(NidaqVoltageController):
         ValueError
             If requested position corresponds to voltages outside of range.
         '''
-        if self.last_write_value is not None:
+        base_um = self._last_position_microns
+        if base_um is None and self.last_write_value is not None:
+            base_um = self._volts_to_microns(self.last_write_value)
+        if base_um is not None:
             try:
-                self.go_to_position(position=self.last_write_value + dx)
+                self.go_to_position(position=base_um + dx)
             except Exception as e:
                 self.logger.warning(e)
         else:
-            # Eventually would like to include a step to read in the position
-            # at this point if read-in was implemented.
-            # For now just raise an error.
-            raise Exception('No last write value provided, cannot step.')   
+            raise Exception('No last position available, cannot step.')   

@@ -1,4 +1,7 @@
-1. Potential issues with graph jumping when initializing wavelength values
-2. Check heat map is working
-3. Get continuous sweep to stop being buggy
-4. Figure out why down sweeping doesn't change the voltage at all
+
+
+1. Fix continuous sweep:
+    one way sweep is working
+    two way sweep is buggy
+2. Ask chunchi about heat map
+3. Export txt file

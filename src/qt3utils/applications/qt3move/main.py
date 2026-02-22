@@ -80,23 +80,23 @@ class Qt3MoveApp(tk.Tk):
             # Don't destroy, continue with piezo only
         
         # Initialize piezo controllers
-        # try:
-        #     piezo_configs = self._get_piezo_configs()
-        #     if 'PiezoX' in piezo_configs:
-        #         self.piezo_x = NidaqPositionController(**piezo_configs['PiezoX'])
-        #         self.piezo_x.configure(piezo_configs['PiezoX'])
-        #     if 'PiezoY' in piezo_configs:
-        #         self.piezo_y = NidaqPositionController(**piezo_configs['PiezoY'])
-        #         self.piezo_y.configure(piezo_configs['PiezoY'])
-        #     if 'PiezoZ' in piezo_configs:
-        #         self.piezo_z = NidaqPositionController(**piezo_configs['PiezoZ'])
-        #         self.piezo_z.configure(piezo_configs['PiezoZ'])
-        #     print("Piezo controllers initialized successfully")
-        # except Exception as e:
-        #     messagebox.showerror(
-        #         "Piezo Connection Error",
-        #         f"Could not initialize piezo controllers.\n\nError: {e}"
-        #     )
+        try:
+            piezo_configs = self._get_piezo_configs()
+            if 'PiezoX' in piezo_configs:
+                self.piezo_x = NidaqPositionController(**piezo_configs['PiezoX'])
+                self.piezo_x.configure(piezo_configs['PiezoX'])
+            if 'PiezoY' in piezo_configs:
+                self.piezo_y = NidaqPositionController(**piezo_configs['PiezoY'])
+                self.piezo_y.configure(piezo_configs['PiezoY'])
+            if 'PiezoZ' in piezo_configs:
+                self.piezo_z = NidaqPositionController(**piezo_configs['PiezoZ'])
+                self.piezo_z.configure(piezo_configs['PiezoZ'])
+            print("Piezo controllers initialized successfully")
+        except Exception as e:
+            messagebox.showerror(
+                "Piezo Connection Error",
+                f"Could not initialize piezo controllers.\n\nError: {e}"
+            )
             # Continue without piezo controllers
 
         # --- GUI State Variables ---
@@ -116,17 +116,17 @@ class Qt3MoveApp(tk.Tk):
         
         # Stepping control variables
         self.stepping_controller_var = tk.StringVar(value="None")
-        self.piezo_x_step_var = tk.StringVar(value="0.1")
-        self.piezo_y_step_var = tk.StringVar(value="0.1")
-        self.piezo_z_step_var = tk.StringVar(value="0.1")
+        self.piezo_x_step_var = tk.StringVar(value="1")
+        self.piezo_y_step_var = tk.StringVar(value="1")
+        self.piezo_z_step_var = tk.StringVar(value="1")
         
         # Piezo variables
         self.piezo_x_set_var = tk.StringVar(value="0.0")
         self.piezo_y_set_var = tk.StringVar(value="0.0")
         self.piezo_z_set_var = tk.StringVar(value="0.0")
-        self.piezo_x_current_var = tk.StringVar(value="--")
-        self.piezo_y_current_var = tk.StringVar(value="--")
-        self.piezo_z_current_var = tk.StringVar(value="--")
+        self.piezo_x_current_var = tk.StringVar(value="---")
+        self.piezo_y_current_var = tk.StringVar(value="---")
+        self.piezo_z_current_var = tk.StringVar(value="---")
 
         self._create_widgets()
         
@@ -198,28 +198,37 @@ class Qt3MoveApp(tk.Tk):
         return piezo_configs
 
     def _initialize_piezo_displays(self):
-        """Initialize piezo position displays with current values"""
+        """Initialize piezo position displays; show --- until user sets a position."""
         if self.piezo_x:
             try:
-                pos = self.piezo_x.get_current_position()
-                self.piezo_x_set_var.set(f"{pos:.3f}")
-                self.piezo_x_current_var.set(f"{pos:.3f}")
+                if getattr(self.piezo_x, 'has_last_position', lambda: False)():
+                    pos = self.piezo_x.get_current_position()
+                    self.piezo_x_set_var.set(f"{pos:.3f}")
+                    self.piezo_x_current_var.set(f"{pos:.3f}")
+                else:
+                    self.piezo_x_current_var.set("---")
             except Exception as e:
                 print(f"Error initializing piezo X display: {e}")
         
         if self.piezo_y:
             try:
-                pos = self.piezo_y.get_current_position()
-                self.piezo_y_set_var.set(f"{pos:.3f}")
-                self.piezo_y_current_var.set(f"{pos:.3f}")
+                if getattr(self.piezo_y, 'has_last_position', lambda: False)():
+                    pos = self.piezo_y.get_current_position()
+                    self.piezo_y_set_var.set(f"{pos:.3f}")
+                    self.piezo_y_current_var.set(f"{pos:.3f}")
+                else:
+                    self.piezo_y_current_var.set("---")
             except Exception as e:
                 print(f"Error initializing piezo Y display: {e}")
         
         if self.piezo_z:
             try:
-                pos = self.piezo_z.get_current_position()
-                self.piezo_z_set_var.set(f"{pos:.3f}")
-                self.piezo_z_current_var.set(f"{pos:.3f}")
+                if getattr(self.piezo_z, 'has_last_position', lambda: False)():
+                    pos = self.piezo_z.get_current_position()
+                    self.piezo_z_set_var.set(f"{pos:.3f}")
+                    self.piezo_z_current_var.set(f"{pos:.3f}")
+                else:
+                    self.piezo_z_current_var.set("---")
             except Exception as e:
                 print(f"Error initializing piezo Z display: {e}")
 
@@ -273,7 +282,7 @@ class Qt3MoveApp(tk.Tk):
         stepping_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
         
         # Stepping controller selection
-        ttk.Label(stepping_frame, text="Enable stepping for:").grid(row=0, column=0, sticky="w", padx=5, pady=(0, 5))
+        ttk.Label(stepping_frame, text="Enable arrow key stepping for:").grid(row=0, column=0, sticky="w", padx=5, pady=(0, 5))
         stepping_controller_combo = ttk.Combobox(
             stepping_frame, 
             textvariable=self.stepping_controller_var,
@@ -313,8 +322,9 @@ class Qt3MoveApp(tk.Tk):
         ttk.Entry(self.piezo_stepping_frame, textvariable=self.piezo_x_step_var, width=10).grid(row=0, column=1, padx=5)
         ttk.Label(self.piezo_stepping_frame, text="Piezo Y Step (µm):").grid(row=1, column=0, sticky="w", padx=5, pady=(5,0))
         ttk.Entry(self.piezo_stepping_frame, textvariable=self.piezo_y_step_var, width=10).grid(row=1, column=1, padx=5, pady=(5,0))
-        ttk.Label(self.piezo_stepping_frame, text="Piezo Z Step (µm):").grid(row=2, column=0, sticky="w", padx=5, pady=(5,0))
-        ttk.Entry(self.piezo_stepping_frame, textvariable=self.piezo_z_step_var, width=10).grid(row=2, column=1, padx=5, pady=(5,0))
+        # Piezo Z temporarily disabled
+        # ttk.Label(self.piezo_stepping_frame, text="Piezo Z Step (µm):").grid(row=2, column=0, sticky="w", padx=5, pady=(5,0))
+        # ttk.Entry(self.piezo_stepping_frame, textvariable=self.piezo_z_step_var, width=10).grid(row=2, column=1, padx=5, pady=(5,0))
         
         # Initially hide both stepping frames
         self._update_stepping_controls_visibility()
@@ -326,7 +336,7 @@ class Qt3MoveApp(tk.Tk):
             
             # Header Labels
             ttk.Label(piezo_frame, text="Set Value (µm)").grid(row=0, column=2, padx=5, pady=5)
-            ttk.Label(piezo_frame, text="Current (µm)").grid(row=0, column=3, padx=5, pady=5)
+            ttk.Label(piezo_frame, text="Previous Value (µm)").grid(row=0, column=3, padx=5, pady=5)
             
             row = 1
             # X-Axis Piezo
@@ -756,27 +766,33 @@ class Qt3MoveApp(tk.Tk):
                 self.microstage_status_label.config(foreground="red")
                 print(f"Error checking microstage movement status: {e}")
         
-        # Update piezo displays
+        # Update piezo displays (--- until user has set a position)
         if self.piezo_x:
             try:
-                pos = self.piezo_x.get_current_position()
-                self.piezo_x_current_var.set(f"{pos:.3f}")
+                if getattr(self.piezo_x, 'has_last_position', lambda: False)():
+                    self.piezo_x_current_var.set(f"{self.piezo_x.get_current_position():.3f}")
+                else:
+                    self.piezo_x_current_var.set("---")
             except Exception as e:
                 self.piezo_x_current_var.set("Error")
                 print(f"Error updating piezo X position: {e}")
         
         if self.piezo_y:
             try:
-                pos = self.piezo_y.get_current_position()
-                self.piezo_y_current_var.set(f"{pos:.3f}")
+                if getattr(self.piezo_y, 'has_last_position', lambda: False)():
+                    self.piezo_y_current_var.set(f"{self.piezo_y.get_current_position():.3f}")
+                else:
+                    self.piezo_y_current_var.set("---")
             except Exception as e:
                 self.piezo_y_current_var.set("Error")
                 print(f"Error updating piezo Y position: {e}")
         
         if self.piezo_z:
             try:
-                pos = self.piezo_z.get_current_position()
-                self.piezo_z_current_var.set(f"{pos:.3f}")
+                if getattr(self.piezo_z, 'has_last_position', lambda: False)():
+                    self.piezo_z_current_var.set(f"{self.piezo_z.get_current_position():.3f}")
+                else:
+                    self.piezo_z_current_var.set("---")
             except Exception as e:
                 self.piezo_z_current_var.set("Error")
                 print(f"Error updating piezo Z position: {e}")
