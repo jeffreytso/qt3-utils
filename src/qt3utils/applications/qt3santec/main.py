@@ -1,5 +1,8 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+import csv
+import os
+from datetime import datetime
 import pyvisa
 import time
 import threading
@@ -653,6 +656,9 @@ class LaserSweepApp:
         self.btn_clear_data = tk.Button(viz_control_frame, text="Clear Data", 
                                         command=self.clear_detector_data, bg="#dddddd")
         self.btn_clear_data.pack(side="left", padx=5)
+        self.btn_export_data = tk.Button(viz_control_frame, text="Export Data",
+                                         command=self.export_detector_data, bg="#dddddd")
+        self.btn_export_data.pack(side="left", padx=5)
         
         # Row 2: Axis bounds controls
         viz_bounds_frame = tk.Frame(self.viz_frame)
@@ -760,6 +766,45 @@ class LaserSweepApp:
             self.detector_ctrl.clear_continuous_data()
         self._update_visualization()
         self.log("Detector data cleared.")
+    
+    def export_detector_data(self):
+        """Export all detector data to a CSV file in tidy format (one file, both detectors)."""
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+        except OSError as e:
+            self.log(f"Export failed: could not create data directory: {e}")
+            messagebox.showerror("Export Failed", f"Could not create data directory:\n{data_dir}\n{e}")
+            return
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = os.path.join(data_dir, f"qt3santec_{timestamp_str}.csv")
+        header = ["detector", "wavelength_nm", "voltage_V", "scan", "timestamp"]
+        rows = []
+        for detector_name, data in self.detector_data.items():
+            n = min(len(data["voltages"]), len(data["wavelengths"]),
+                    len(data["scans"]), len(data["timestamps"]))
+            for i in range(n):
+                rows.append([
+                    detector_name,
+                    data["wavelengths"][i],
+                    data["voltages"][i],
+                    data["scans"][i],
+                    data["timestamps"][i],
+                ])
+        if not rows:
+            self.log("Export skipped: no data to export.")
+            messagebox.showinfo("Export", "No data to export. Collect data first.")
+            return
+        try:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(rows)
+            self.log(f"Exported {len(rows)} rows to {filename}")
+            messagebox.showinfo("Export", f"Exported {len(rows)} rows to:\n{filename}")
+        except OSError as e:
+            self.log(f"Export failed: {e}")
+            messagebox.showerror("Export Failed", str(e))
     
     def _on_detector_selection_changed(self, event=None):
         """Callback when detector selection changes."""
