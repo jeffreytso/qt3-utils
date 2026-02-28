@@ -82,7 +82,7 @@ class PhotodetectorController:
         except Exception as e:
             raise RuntimeError(f"Error reading detectors: {e}")
     
-    def start_continuous_sampling(self, sample_rate_hz=1000, samples_per_read=100):
+    def start_continuous_sampling(self, sample_rate_hz=200, samples_per_read=100):
         """
         Start continuous sampling from both detectors.
         
@@ -119,9 +119,12 @@ class PhotodetectorController:
             self.continuous_running = False
             raise RuntimeError(f"Error starting continuous sampling: {e}")
     
-    def read_continuous_samples(self):
+    def read_continuous_samples(self, timeout=1.0):
         """
         Read samples from continuous sampling task.
+        
+        Args:
+            timeout: Max seconds to wait for data (use shorter value in drain to avoid long gaps).
         
         Returns:
             tuple: (samples1, samples2, timestamps) where samples are numpy arrays
@@ -132,7 +135,7 @@ class PhotodetectorController:
         try:
             data = self.continuous_task.read(
                 number_of_samples_per_channel=self.samples_per_read,
-                timeout=1.0
+                timeout=timeout
             )
             # data is a list of arrays, one per channel: [array1, array2]
             if not isinstance(data, (list, tuple)) or len(data) < 2:
@@ -203,6 +206,11 @@ class PhotodetectorController:
     def clear_continuous_data(self):
         """Clear stored continuous sampling data."""
         self.continuous_samples = []
+        self.continuous_timestamps = []
+
+    def reset_continuous_timeline(self):
+        """Reset the timestamp timeline so the next read uses time.time() as base.
+        Call at the start of each new scan so timestamps align with wall clock after a delay."""
         self.continuous_timestamps = []
 
 # ==============================================================================
@@ -453,8 +461,11 @@ class LaserSweepApp:
         # Set minimum window size to prevent resizing when switching modes
         self.root.minsize(600, 500)
         
+        main_frame = tk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
         # Connection
-        conn_frame = tk.LabelFrame(self.root, text="Connection")
+        conn_frame = tk.LabelFrame(main_frame, text="Laser and Optical Switch Connection")
         conn_frame.pack(fill="x", padx=10, pady=5)
         self.btn_connect = tk.Button(conn_frame, text="Connect System", command=self.connect_hardware, bg="#dddddd")
         self.btn_connect.pack(side="left", padx=5, pady=5)
@@ -462,7 +473,7 @@ class LaserSweepApp:
         self.lbl_status.pack(side="left", padx=5)
 
         # Photodetector Configuration
-        self.detector_config_frame = tk.LabelFrame(self.root, text="Photodetector Configuration")
+        self.detector_config_frame = tk.LabelFrame(main_frame, text="Photodetector Configuration")
         self.detector_config_frame.pack(fill="x", padx=10, pady=5)
         
         tk.Label(self.detector_config_frame, text="DAQ Device:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
@@ -480,20 +491,16 @@ class LaserSweepApp:
         self.ent_channel2.grid(row=0, column=5, padx=5, pady=5)
         self.ent_channel2.insert(0, "ai1")
         
-        tk.Label(self.detector_config_frame, text="Sample Rate (Hz):").grid(row=1, column=0, sticky="e", padx=5, pady=5)
-        self.ent_sample_rate = tk.Entry(self.detector_config_frame, width=10)
-        self.ent_sample_rate.grid(row=1, column=1, padx=5, pady=5)
-        self.ent_sample_rate.insert(0, "1000")
-        
-        self.btn_init_detectors = tk.Button(self.detector_config_frame, text="Initialize Detectors", 
+        detector_btn_frame = tk.Frame(self.detector_config_frame)
+        detector_btn_frame.grid(row=1, column=0, columnspan=6, sticky="w")
+        self.btn_init_detectors = tk.Button(detector_btn_frame, text="Initialize Detectors", 
                                             command=self.init_detectors, bg="#dddddd")
-        self.btn_init_detectors.grid(row=1, column=2, columnspan=2, padx=5, pady=5)
-        
-        self.lbl_detector_status = tk.Label(self.detector_config_frame, text="Detectors: Not Initialized", fg="red")
-        self.lbl_detector_status.grid(row=1, column=4, columnspan=2, padx=5, pady=5)
+        self.btn_init_detectors.pack(side="left", padx=5, pady=5)
+        self.lbl_detector_status = tk.Label(detector_btn_frame, text="Detectors: Not Initialized", fg="red")
+        self.lbl_detector_status.pack(side="left", padx=5)
 
         # Manual Control
-        manual_frame = tk.LabelFrame(self.root, text="Manual Control")
+        manual_frame = tk.LabelFrame(main_frame, text="Manual Control")
         manual_frame.pack(fill="x", padx=10, pady=5)
         tk.Label(manual_frame, text="Set Wavelength (nm):").pack(side="left", padx=5)
         self.ent_manual_wav = tk.Entry(manual_frame, width=10)
@@ -508,7 +515,7 @@ class LaserSweepApp:
         self.btn_set_power.pack(side="left", padx=5)
 
         # Sweep Type Selection
-        sweep_type_frame = tk.Frame(self.root)
+        sweep_type_frame = tk.Frame(main_frame)
         sweep_type_frame.pack(fill="x", padx=10, pady=5)
         tk.Label(sweep_type_frame, text="Sweep Type:").pack(side="left", padx=5)
         self.combo_sweep_type = ttk.Combobox(sweep_type_frame, width=20, state="readonly", values=["Step Sweep", "Continuous Sweep"])
@@ -517,7 +524,7 @@ class LaserSweepApp:
         self.combo_sweep_type.bind("<<ComboboxSelected>>", self._toggle_sweep_type)
 
         # Sweep Config (Step Sweep)
-        self.sweep_frame = tk.LabelFrame(self.root, text="Sweep Configuration")
+        self.sweep_frame = tk.LabelFrame(main_frame, text="Sweep Configuration")
         self.sweep_frame.pack(fill="x", padx=10, pady=5)
 
         # Row 0: Range and Sweep direction option
@@ -565,7 +572,7 @@ class LaserSweepApp:
         for child in self.sweep_frame.winfo_children(): child.grid_configure(padx=5, pady=5)
 
         # Continuous Sweep Config
-        self.cont_sweep_frame = tk.LabelFrame(self.root, text="Continuous Sweep Configuration")
+        self.cont_sweep_frame = tk.LabelFrame(main_frame, text="Continuous Sweep Configuration")
         self.cont_sweep_frame.pack(fill="x", padx=10, pady=5)
 
         # Row 0: Range and Laser selection
@@ -588,11 +595,14 @@ class LaserSweepApp:
         self.combo_cont_mode.grid(row=1, column=3, sticky="w")
         self.combo_cont_mode.set("One-way")
 
-        # Row 2: Scans and Delay
+        # Row 2: Scans, Delay, Sample Rate (Hz)
         tk.Label(self.cont_sweep_frame, text="Scans:").grid(row=2, column=0, sticky="e")
         self.ent_cont_scans = tk.Entry(self.cont_sweep_frame, width=10); self.ent_cont_scans.grid(row=2, column=1)
         tk.Label(self.cont_sweep_frame, text="Delay (s):").grid(row=2, column=2, sticky="e")
         self.ent_cont_delay = tk.Entry(self.cont_sweep_frame, width=10); self.ent_cont_delay.grid(row=2, column=3)
+        tk.Label(self.cont_sweep_frame, text="Sample Rate (Hz):").grid(row=2, column=4, sticky="e")
+        self.ent_sample_rate = tk.Entry(self.cont_sweep_frame, width=10); self.ent_sample_rate.grid(row=2, column=5)
+        self.ent_sample_rate.insert(0, "200")
 
         for child in self.cont_sweep_frame.winfo_children(): child.grid_configure(padx=5, pady=5)
         
@@ -610,7 +620,7 @@ class LaserSweepApp:
         self.cont_sweep_frame.pack_forget()
 
         # Actions - placed after sweep configuration sections
-        self.action_frame = tk.Frame(self.root)
+        self.action_frame = tk.Frame(main_frame)
         self.action_frame.pack(fill="x", padx=10, pady=10)
         self.btn_start = tk.Button(self.action_frame, text="START", bg="green", fg="white", font=("Arial", 10, "bold"), command=self.start_sweep_thread, state="disabled")
         self.btn_start.pack(side="left", fill="x", expand=True, padx=5)
@@ -618,7 +628,7 @@ class LaserSweepApp:
         self.btn_stop.pack(side="left", fill="x", expand=True, padx=5)
 
         # Visualization Section
-        self.viz_frame = tk.LabelFrame(self.root, text="Visualization")
+        self.viz_frame = tk.LabelFrame(main_frame, text="Visualization")
         self.viz_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
         # Control panel for visualization
@@ -694,7 +704,7 @@ class LaserSweepApp:
             'scan_min': None,
             'scan_max': None
         }
-        
+
         # Matplotlib figure and canvas
         self.viz_fig = Figure(figsize=(8, 5), dpi=100)
         self.viz_ax = self.viz_fig.add_subplot(111)
@@ -711,13 +721,8 @@ class LaserSweepApp:
         # Initialize empty plot
         self._update_visualization()
 
-        # Logger - placed after visualization
-        self.txt_log = tk.Text(self.root, height=8, width=60)
-        self.txt_log.pack(padx=10, pady=5)
-
     def log(self, msg):
-        self.root.after(0, lambda: self.txt_log.insert(tk.END, msg + "\n"))
-        self.root.after(0, lambda: self.txt_log.see(tk.END))
+        print(msg)
     
     def init_detectors(self):
         """Initialize the photodetector controller with user-specified settings."""
@@ -1316,13 +1321,13 @@ class LaserSweepApp:
         self.current_scan = 0
         sweep_start_time = None
         scan_start_time = None
-        wavelength_range = p['end'] - p['start']
-        sweep_duration = wavelength_range / p['speed']  # Time for one-way sweep
+        wavelength_range = p['end'] - p['start']  # Can be negative for backwards (start > end)
+        sweep_duration = abs(p['end'] - p['start']) / p['speed']  # Time for one-way sweep (always positive)
         
         # Start continuous sampling if detectors are initialized
         if self.detector_ctrl:
             try:
-                sample_rate = int(self.ent_sample_rate.get().strip() or "1000")
+                sample_rate = int(self.ent_sample_rate.get().strip() or "200")
                 self.detector_ctrl.start_continuous_sampling(sample_rate_hz=sample_rate)
                 self.log(f"Continuous sampling started at {sample_rate} Hz")
             except Exception as e:
@@ -1382,6 +1387,9 @@ class LaserSweepApp:
                         start_aligned = False
                         last_stored_ts_current_scan = None
                         last_stored_wl_current_scan = None
+                        # Re-sync detector timestamps to wall clock so samples after delay are not skipped
+                        if self.detector_ctrl and self.detector_ctrl.continuous_running:
+                            self.detector_ctrl.reset_continuous_timeline()
                 
                 # Read continuous samples and correlate with wavelength
                 if self.detector_ctrl and self.detector_ctrl.continuous_running:
@@ -1464,7 +1472,7 @@ class LaserSweepApp:
                     if last_stored_ts_current_scan is not None and last_stored_wl_current_scan is not None:
                         elapsed_data_s = last_stored_ts_current_scan - scan_start_time
                         wl_span = abs(p['end'] - p['start'])
-                        wl_near_start_ok = last_stored_wl_current_scan <= p['start'] + 0.15 * wl_span if wl_span > 0 else True
+                        wl_near_start_ok = abs(last_stored_wl_current_scan - p['start']) <= 0.15 * wl_span if wl_span > 0 else True
                     else:
                         wl_near_start_ok = False
                         elapsed_data_s = 0.0
@@ -1476,44 +1484,102 @@ class LaserSweepApp:
 
                 # Only declare complete when status=0 for debounce period AND (two-way) elapsed >= full cycle AND last wl near start
                 if ((status == 0 and sweep_running and status_0_debounce_count >= status_0_required and elapsed_ok) or force_complete) and wl_near_start_ok:
-                    completed_scans += 1
-                    # Diagnostic: last stored sample + timing
+                    # Drain buffer for this scan before declaring complete (so every scan gets full data)
+                    drain_scan_start_time = scan_start_time
+                    drain_current_scan = self.current_scan
+                    if self.detector_ctrl and self.detector_ctrl.continuous_running and drain_scan_start_time is not None:
+                        drain_added = 0
+                        empty_reads = 0
+                        max_empty = 1  # Exit after one empty read to minimize gap between scans
+                        for _ in range(50):
+                            try:
+                                s1, s2, timestamps = self.detector_ctrl.read_continuous_samples(timeout=0.15)
+                                if s1 is None or len(s1) == 0:
+                                    empty_reads += 1
+                                    if empty_reads >= max_empty:
+                                        break
+                                    time.sleep(0.02)
+                                    continue
+                                empty_reads = 0
+                                for i, ts in enumerate(timestamps):
+                                    elapsed = ts - drain_scan_start_time
+                                    if elapsed < 0:
+                                        continue
+                                    if p['mode'] == 1:
+                                        if elapsed <= sweep_duration:
+                                            wavelength = p['start'] + (elapsed / sweep_duration) * wavelength_range
+                                        else:
+                                            wavelength = p['end']
+                                    else:
+                                        cycle_time = 2 * sweep_duration
+                                        if elapsed >= cycle_time:
+                                            wavelength = p['start']
+                                        else:
+                                            cycle_pos = elapsed / cycle_time
+                                            if cycle_pos < 0.5:
+                                                wavelength = p['start'] + (cycle_pos * 2) * wavelength_range
+                                            else:
+                                                wavelength = p['end'] - ((cycle_pos - 0.5) * 2) * wavelength_range
+                                    self.detector_data['PDA50B2']['voltages'].append(float(s1[i]))
+                                    self.detector_data['PDA50B2']['wavelengths'].append(wavelength)
+                                    self.detector_data['PDA50B2']['scans'].append(drain_current_scan)
+                                    self.detector_data['PDA50B2']['timestamps'].append(ts)
+                                    self.detector_data['PDA10CS2']['voltages'].append(float(s2[i]))
+                                    self.detector_data['PDA10CS2']['wavelengths'].append(wavelength)
+                                    self.detector_data['PDA10CS2']['scans'].append(drain_current_scan)
+                                    self.detector_data['PDA10CS2']['timestamps'].append(ts)
+                                    drain_added += 1
+                                time.sleep(0.02)
+                            except Exception:
+                                break
+                        if drain_added > 0:
+                            self.log(f"Drain complete: {drain_added} points added to scan {drain_current_scan}.")
+                            print(f"[DIAG drain] scan={drain_current_scan}  points_added={drain_added}")
+
+                    # 0-point guard: only count scan complete if we have at least one point
                     det = 'PDA50B2'
                     wl_arr = np.array(self.detector_data[det]['wavelengths'])
                     sc_arr = np.array(self.detector_data[det]['scans'])
-                    ts_arr = np.array(self.detector_data[det]['timestamps'])
-                    mask = (sc_arr == completed_scans)
+                    mask = (sc_arr == drain_current_scan)
                     n_pts = int(np.sum(mask))
-                    if n_pts > 0:
+
+                    if n_pts == 0:
+                        self.log(f"Warning: scan {drain_current_scan} has 0 points; not counting as complete, retrying sweep.")
+                        print(f"[DIAG 0-point] scan={drain_current_scan}  skipping completion, retrying.")
+                        sweep_running = False
+                        scan_start_time = None
+                        status_0_debounce_count = 0
+                        if not self.stop_flag:
+                            self.ctrl.start_repeat_sweep(p['laser'])
+                            time.sleep(0.2)
+                    else:
+                        completed_scans += 1
                         last_idx = np.where(mask)[0][-1]
                         last_wl = float(wl_arr[last_idx])
                         print(f"[DIAG end] scan={completed_scans}  points={n_pts}  last_stored_wl={last_wl:.4f}  elapsed_since_start={elapsed_s:.3f}s  expected_cycle_s={expected_cycle_s:.3f}")
-                    else:
-                        print(f"[DIAG end] scan={completed_scans}  points=0  elapsed_since_start={elapsed_s:.3f}s  expected_cycle_s={expected_cycle_s:.3f}")
-                    self.log(f"Scan {completed_scans}/{p['scans']} completed.")
-                    sweep_running = False
-                    scan_start_time = None
-                    status_0_debounce_count = 0
-                    
-                    # If we've completed all scans, stop
-                    if completed_scans >= p['scans']:
-                        self.ctrl.stop_continuous_sweep(p['laser'])
-                        break
-                    
-                    # Wait for delay before next scan (if not last scan)
-                    if completed_scans < p['scans']:
-                        self.log(f"Waiting {p['delay']} s before next scan...")
-                        delay_start = time.time()
-                        while time.time() - delay_start < p['delay']:
-                            if self.stop_flag:
-                                self.ctrl.stop_continuous_sweep(p['laser'])
-                                break
-                            time.sleep(0.1)
-                        
-                        # Restart repeat scan after delay if not stopped
-                        if not self.stop_flag:
-                            self.ctrl.start_repeat_sweep(p['laser'])
-                            time.sleep(0.2)  # Brief pause to allow sweep to start
+                        self.log(f"Scan {completed_scans}/{p['scans']} completed.")
+                        sweep_running = False
+                        scan_start_time = None
+                        status_0_debounce_count = 0
+
+                        if completed_scans >= p['scans']:
+                            self.ctrl.stop_continuous_sweep(p['laser'])
+                            break
+
+                        # Wait for delay before next scan (if not last scan)
+                        if completed_scans < p['scans']:
+                            self.log(f"Waiting {p['delay']} s before next scan...")
+                            delay_start = time.time()
+                            while time.time() - delay_start < p['delay']:
+                                if self.stop_flag:
+                                    self.ctrl.stop_continuous_sweep(p['laser'])
+                                    break
+                                time.sleep(0.1)
+                            
+                            # Restart repeat scan after delay if not stopped
+                            if not self.stop_flag:
+                                self.ctrl.start_repeat_sweep(p['laser'])
+                                time.sleep(0.2)  # Brief pause to allow sweep to start
                 
                 last_status = status
                 time.sleep(0.01)  # Check more frequently for better sampling
