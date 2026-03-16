@@ -29,9 +29,9 @@ LASER_CONFIG = [
 # PHOTODETECTOR CONTROLLER
 # ==============================================================================
 class PhotodetectorController:
-    """Controller for reading voltage from two photodetectors via NI DAQ."""
+    """Controller for reading voltage from two or three photodetectors via NI DAQ."""
     
-    def __init__(self, device_name='Dev1', channel1='ai0', channel2='ai1', 
+    def __init__(self, device_name='Dev1', channel1='ai0', channel2='ai1', channel3=None,
                  min_voltage=-10.0, max_voltage=10.0):
         """
         Initialize photodetector controller.
@@ -40,12 +40,14 @@ class PhotodetectorController:
             device_name: NI DAQ device name (e.g., 'Dev1')
             channel1: Analog input channel for first detector (PDA50B2)
             channel2: Analog input channel for second detector (PDA10CS2)
+            channel3: Optional analog input for third detector (PDA100A2, for power monitor)
             min_voltage: Minimum expected voltage
             max_voltage: Maximum expected voltage
         """
         self.device_name = device_name
         self.channel1 = channel1
         self.channel2 = channel2
+        self.channel3 = channel3
         self.min_voltage = min_voltage
         self.max_voltage = max_voltage
         self.continuous_task = None
@@ -55,14 +57,13 @@ class PhotodetectorController:
         
     def read_both_detectors(self):
         """
-        Read voltage from both detectors simultaneously.
+        Read voltage from both detectors (channel1, channel2) simultaneously.
         
         Returns:
             tuple: (voltage1, voltage2) in volts
         """
         try:
             with nidaqmx.Task() as task:
-                # Add both analog input channels
                 task.ai_channels.add_ai_voltage_chan(
                     f"{self.device_name}/{self.channel1}",
                     min_val=self.min_voltage,
@@ -73,9 +74,7 @@ class PhotodetectorController:
                     min_val=self.min_voltage,
                     max_val=self.max_voltage
                 )
-                # Read both channels - returns list of arrays, one per channel
                 data = task.read(number_of_samples_per_channel=1)
-                # Handle different return formats
                 if isinstance(data, (list, tuple)) and len(data) >= 2:
                     v1 = float(data[0][0] if hasattr(data[0], '__getitem__') else data[0])
                     v2 = float(data[1][0] if hasattr(data[1], '__getitem__') else data[1])
@@ -84,14 +83,48 @@ class PhotodetectorController:
                     raise RuntimeError(f"Unexpected data format from DAQ: {type(data)}")
         except Exception as e:
             raise RuntimeError(f"Error reading detectors: {e}")
+
+    def read_three_detectors(self):
+        """
+        Read voltage from all three detectors (channel1, channel2, channel3) simultaneously.
+        Requires channel3 to be set.
+        
+        Returns:
+            tuple: (voltage1, voltage2, voltage3) in volts
+        """
+        if not self.channel3:
+            raise RuntimeError("Third channel not configured")
+        try:
+            with nidaqmx.Task() as task:
+                task.ai_channels.add_ai_voltage_chan(
+                    f"{self.device_name}/{self.channel1}",
+                    min_val=self.min_voltage,
+                    max_val=self.max_voltage
+                )
+                task.ai_channels.add_ai_voltage_chan(
+                    f"{self.device_name}/{self.channel2}",
+                    min_val=self.min_voltage,
+                    max_val=self.max_voltage
+                )
+                task.ai_channels.add_ai_voltage_chan(
+                    f"{self.device_name}/{self.channel3}",
+                    min_val=self.min_voltage,
+                    max_val=self.max_voltage
+                )
+                data = task.read(number_of_samples_per_channel=1)
+                if isinstance(data, (list, tuple)) and len(data) >= 3:
+                    v1 = float(data[0][0] if hasattr(data[0], '__getitem__') else data[0])
+                    v2 = float(data[1][0] if hasattr(data[1], '__getitem__') else data[1])
+                    v3 = float(data[2][0] if hasattr(data[2], '__getitem__') else data[2])
+                    return (v1, v2, v3)
+                else:
+                    raise RuntimeError(f"Unexpected data format from DAQ: {type(data)}")
+        except Exception as e:
+            raise RuntimeError(f"Error reading detectors: {e}")
     
     def start_continuous_sampling(self, sample_rate_hz=200, samples_per_read=100):
         """
-        Start continuous sampling from both detectors.
-        
-        Args:
-            sample_rate_hz: Sampling rate in Hz
-            samples_per_read: Number of samples to read per read operation
+        Start continuous sampling from two or three detectors.
         """
         if self.continuous_running:
             self.stop_continuous_sampling()
@@ -108,6 +141,12 @@ class PhotodetectorController:
                 min_val=self.min_voltage,
                 max_val=self.max_voltage
             )
+            if self.channel3:
+                self.continuous_task.ai_channels.add_ai_voltage_chan(
+                    f"{self.device_name}/{self.channel3}",
+                    min_val=self.min_voltage,
+                    max_val=self.max_voltage
+                )
             self.continuous_task.timing.cfg_samp_clk_timing(
                 rate=sample_rate_hz,
                 sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS
@@ -126,31 +165,28 @@ class PhotodetectorController:
         """
         Read samples from continuous sampling task.
         
-        Args:
-            timeout: Max seconds to wait for data (use shorter value in drain to avoid long gaps).
-        
         Returns:
-            tuple: (samples1, samples2, timestamps) where samples are numpy arrays
+            tuple: (samples1, samples2, samples3_or_None, timestamps)
+            samples3 is None when only two channels are configured.
         """
         if not self.continuous_running or self.continuous_task is None:
-            return None, None, None
+            return None, None, None, None
         
         try:
             data = self.continuous_task.read(
                 number_of_samples_per_channel=self.samples_per_read,
                 timeout=timeout
             )
-            # data is a list of arrays, one per channel: [array1, array2]
             if not isinstance(data, (list, tuple)) or len(data) < 2:
-                return None, None, None
+                return None, None, None, None
             
             samples1 = np.array(data[0])
             samples2 = np.array(data[1])
+            samples3 = np.array(data[2]) if self.channel3 and len(data) >= 3 else None
             
-            # Generate timestamps based on sample rate
             num_samples = len(samples1)
             if num_samples == 0:
-                return None, None, None
+                return None, None, None, None
                 
             if len(self.continuous_timestamps) == 0:
                 start_time = time.time()
@@ -163,17 +199,17 @@ class PhotodetectorController:
                 num_samples
             )
             
-            # Store samples
-            self.continuous_samples.append((samples1, samples2))
+            if samples3 is not None:
+                self.continuous_samples.append((samples1, samples2, samples3))
+            else:
+                self.continuous_samples.append((samples1, samples2))
             self.continuous_timestamps.extend(timestamps.tolist())
             
-            return samples1, samples2, timestamps
+            return samples1, samples2, samples3, timestamps
         except nidaqmx.errors.DaqReadError:
-            # Timeout - this is normal when no data is available yet
-            return None, None, None
+            return None, None, None, None
         except Exception as e:
-            # Other error - return None
-            return None, None, None
+            return None, None, None, None
     
     def stop_continuous_sampling(self):
         """Stop continuous sampling task."""
@@ -189,7 +225,7 @@ class PhotodetectorController:
     
     def get_all_continuous_data(self):
         """
-        Get all collected continuous sampling data.
+        Get all collected continuous sampling data (first two channels only).
         
         Returns:
             tuple: (samples1_all, samples2_all, timestamps_all)
@@ -430,6 +466,80 @@ class SantecController:
             except: pass
 
 # ==============================================================================
+# POWER MONITOR WINDOW (Toplevel)
+# ==============================================================================
+VOLT_TO_MW_FACTOR = 7.0  # power_MW = voltage_V / 7.0 (fixed gain assumption)
+
+
+class PowerMonitorWindow(tk.Toplevel):
+    """
+    Separate window showing PDA50B2 and PDA100A2 power in MW.
+    Polls latest voltages from LaserSweepApp; never touches NI DAQ directly.
+    """
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.title("Power Monitor")
+        self.minsize(400, 220)
+        self._update_interval_ms = 200
+        self._poll_id = None
+        
+        main_frame = tk.Frame(self)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        tk.Label(main_frame, text="Photodetector Power (MW)", font=("Arial", 11, "bold")).grid(
+            row=0, column=0, columnspan=2, pady=(0, 10))
+        
+        tk.Label(main_frame, text="PDA50B2 Power (MW):", font=("Arial", 10, "bold")).grid(
+            row=1, column=0, sticky="e", padx=5, pady=5)
+        self.lbl_pda50b2_power = tk.Label(main_frame, text="--", font=("Arial", 16, "bold"), fg="#0044aa")
+        self.lbl_pda50b2_power.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        tk.Label(main_frame, text="Voltage (V):").grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        self.lbl_pda50b2_voltage = tk.Label(main_frame, text="--")
+        self.lbl_pda50b2_voltage.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        
+        tk.Label(main_frame, text="PDA100A2 Power (MW):", font=("Arial", 10, "bold")).grid(
+            row=3, column=0, sticky="e", padx=5, pady=10)
+        self.lbl_pda100a2_power = tk.Label(main_frame, text="--", font=("Arial", 16, "bold"), fg="#006600")
+        self.lbl_pda100a2_power.grid(row=3, column=1, sticky="w", padx=5, pady=10)
+        tk.Label(main_frame, text="Voltage (V):").grid(row=4, column=0, sticky="e", padx=5, pady=2)
+        self.lbl_pda100a2_voltage = tk.Label(main_frame, text="--")
+        self.lbl_pda100a2_voltage.grid(row=4, column=1, sticky="w", padx=5, pady=2)
+        
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
+        self._schedule_poll()
+    
+    def _voltage_to_mw(self, voltage):
+        if voltage is None:
+            return None
+        return voltage / VOLT_TO_MW_FACTOR
+    
+    def _poll(self):
+        self.app.sample_detectors_for_power_monitor()
+        v50 = self.app.get_latest_pda50b2_voltage()
+        v100 = self.app.get_latest_pda100a2_voltage()
+        p50 = self._voltage_to_mw(v50)
+        p100 = self._voltage_to_mw(v100)
+        self.lbl_pda50b2_voltage.config(text=f"{v50:.4f}" if v50 is not None else "--")
+        self.lbl_pda100a2_voltage.config(text=f"{v100:.4f}" if v100 is not None else "--")
+        self.lbl_pda50b2_power.config(text=f"{p50:.4f}" if p50 is not None else "--")
+        self.lbl_pda100a2_power.config(text=f"{p100:.4f}" if p100 is not None else "--")
+        self._schedule_poll()
+    
+    def _schedule_poll(self):
+        if self.winfo_exists():
+            self._poll_id = self.after(self._update_interval_ms, self._poll)
+    
+    def _on_closing(self):
+        if self._poll_id:
+            self.after_cancel(self._poll_id)
+            self._poll_id = None
+        if self.app.power_monitor_window is self:
+            self.app.power_monitor_window = None
+        self.destroy()
+
+
+# ==============================================================================
 # FRONTEND GUI
 # ==============================================================================
 class LaserSweepApp:
@@ -457,6 +567,10 @@ class LaserSweepApp:
             }
         }
         self.current_scan = 0
+        # Latest voltages for power monitor (PDA50B2, PDA100A2)
+        self._latest_pda50b2_voltage = None
+        self._latest_pda100a2_voltage = None
+        self.power_monitor_window = None
         
         self._build_gui()
 
@@ -487,20 +601,28 @@ class LaserSweepApp:
         tk.Label(self.detector_config_frame, text="PDA50B2 Channel:").grid(row=0, column=2, sticky="e", padx=5, pady=5)
         self.ent_channel1 = tk.Entry(self.detector_config_frame, width=10)
         self.ent_channel1.grid(row=0, column=3, padx=5, pady=5)
-        self.ent_channel1.insert(0, "ai0")
+        self.ent_channel1.insert(0, "ai2")
         
         tk.Label(self.detector_config_frame, text="PDA10CS2 Channel:").grid(row=0, column=4, sticky="e", padx=5, pady=5)
         self.ent_channel2 = tk.Entry(self.detector_config_frame, width=10)
         self.ent_channel2.grid(row=0, column=5, padx=5, pady=5)
         self.ent_channel2.insert(0, "ai1")
         
+        tk.Label(self.detector_config_frame, text="PDA100A2 Channel:").grid(row=0, column=6, sticky="e", padx=5, pady=5)
+        self.ent_channel3 = tk.Entry(self.detector_config_frame, width=10)
+        self.ent_channel3.grid(row=0, column=7, padx=5, pady=5)
+        self.ent_channel3.insert(0, "ai0")
+        
         detector_btn_frame = tk.Frame(self.detector_config_frame)
-        detector_btn_frame.grid(row=1, column=0, columnspan=6, sticky="w")
+        detector_btn_frame.grid(row=1, column=0, columnspan=8, sticky="w")
         self.btn_init_detectors = tk.Button(detector_btn_frame, text="Initialize Detectors", 
                                             command=self.init_detectors, bg="#dddddd")
         self.btn_init_detectors.pack(side="left", padx=5, pady=5)
         self.lbl_detector_status = tk.Label(detector_btn_frame, text="Detectors: Not Initialized", fg="red")
         self.lbl_detector_status.pack(side="left", padx=5)
+        self.btn_open_power_monitor = tk.Button(detector_btn_frame, text="Open Power Monitor",
+                                               command=self._open_power_monitor, bg="#dddddd")
+        self.btn_open_power_monitor.pack(side="left", padx=5, pady=5)
 
         # Manual Control
         manual_frame = tk.LabelFrame(main_frame, text="Manual Control")
@@ -629,6 +751,8 @@ class LaserSweepApp:
         self.btn_start.pack(side="left", fill="x", expand=True, padx=5)
         self.btn_stop = tk.Button(self.action_frame, text="STOP", bg="red", fg="white", font=("Arial", 10, "bold"), command=self.stop_sweep, state="disabled")
         self.btn_stop.pack(side="left", fill="x", expand=True, padx=5)
+        self.lbl_experiment_status = tk.Label(self.action_frame, text="Experiment: Idle", font=("Arial", 10), fg="#333")
+        self.lbl_experiment_status.pack(side="left", padx=15, pady=2)
 
         # Visualization Section
         self.viz_frame = tk.LabelFrame(main_frame, text="Visualization")
@@ -736,19 +860,26 @@ class LaserSweepApp:
             device_name = self.ent_daq_device.get().strip()
             channel1 = self.ent_channel1.get().strip()
             channel2 = self.ent_channel2.get().strip()
+            channel3_raw = self.ent_channel3.get().strip()
+            channel3 = channel3_raw if channel3_raw else None
             
             if not device_name or not channel1 or not channel2:
-                messagebox.showerror("Error", "Please specify DAQ device and both channels.")
+                messagebox.showerror("Error", "Please specify DAQ device and both PDA50B2 and PDA10CS2 channels.")
                 return
             
-            # Test connection by reading once
-            test_ctrl = PhotodetectorController(device_name, channel1, channel2)
-            test_ctrl.read_both_detectors()
+            test_ctrl = PhotodetectorController(device_name, channel1, channel2, channel3=channel3)
+            if channel3:
+                v1, v2, v3 = test_ctrl.read_three_detectors()
+                self._latest_pda50b2_voltage = v1
+                self._latest_pda100a2_voltage = v3
+            else:
+                v1, v2 = test_ctrl.read_both_detectors()
+                self._latest_pda50b2_voltage = v1
             
-            # Initialize the actual controller
-            self.detector_ctrl = PhotodetectorController(device_name, channel1, channel2)
+            self.detector_ctrl = PhotodetectorController(device_name, channel1, channel2, channel3=channel3)
             self.lbl_detector_status.config(text="Detectors: Initialized", fg="green")
-            self.log(f"Detectors initialized: {device_name}, Channels: {channel1}, {channel2}")
+            ch_info = f"{channel1}, {channel2}" + (f", {channel3}" if channel3 else "")
+            self.log(f"Detectors initialized: {device_name}, Channels: {ch_info}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to initialize detectors: {e}")
             self.lbl_detector_status.config(text="Detectors: Error", fg="red")
@@ -766,6 +897,52 @@ class LaserSweepApp:
             self.detector_ctrl.clear_continuous_data()
         self._update_visualization()
         self.log("Detector data cleared.")
+
+    def get_latest_pda50b2_voltage(self):
+        """Return the most recent PDA50B2 voltage (V) for the power monitor, or None."""
+        if self._latest_pda50b2_voltage is not None:
+            return self._latest_pda50b2_voltage
+        if self.detector_data['PDA50B2']['voltages']:
+            return self.detector_data['PDA50B2']['voltages'][-1]
+        return None
+
+    def get_latest_pda100a2_voltage(self):
+        """Return the most recent PDA100A2 voltage (V) for the power monitor, or None."""
+        return self._latest_pda100a2_voltage
+
+    def sample_detectors_for_power_monitor(self):
+        """
+        Perform a one-shot DAQ read to update latest voltages for the power monitor.
+        Only runs when no sweep/continuous sampling is active (to avoid resource conflict).
+        """
+        if not self.detector_ctrl:
+            return
+        if self.detector_ctrl.continuous_running:
+            return
+        try:
+            if self.detector_ctrl.channel3:
+                v1, v2, v3 = self.detector_ctrl.read_three_detectors()
+                self._latest_pda50b2_voltage = v1
+                self._latest_pda100a2_voltage = v3
+            else:
+                v1, v2 = self.detector_ctrl.read_both_detectors()
+                self._latest_pda50b2_voltage = v1
+                # PDA100A2 not configured; leave _latest_pda100a2_voltage as is
+        except Exception:
+            pass
+
+    def _open_power_monitor(self):
+        """Create or bring to front the power monitor Toplevel window."""
+        if self.power_monitor_window is not None and self.power_monitor_window.winfo_exists():
+            self.power_monitor_window.lift()
+            self.power_monitor_window.focus_force()
+            return
+        self.power_monitor_window = PowerMonitorWindow(self.root, self)
+    
+    def _set_experiment_status(self, text):
+        """Update the experiment status label (call from main thread or via root.after(0, ...))."""
+        if hasattr(self, 'lbl_experiment_status'):
+            self.lbl_experiment_status.config(text=text)
     
     def export_detector_data(self):
         """Export all detector data to a CSV file in tidy format (one file, both detectors)."""
@@ -1368,11 +1545,13 @@ class LaserSweepApp:
         scan_start_time = None
         wavelength_range = p['end'] - p['start']  # Can be negative for backwards (start > end)
         sweep_duration = abs(p['end'] - p['start']) / p['speed']  # Time for one-way sweep (always positive)
+        sample_rate = int(self.ent_sample_rate.get().strip() or "200")  # For diagnostics and expected-points
+        expected_points_one_way = int(sweep_duration * sample_rate)
+        expected_points_two_way = int(2 * sweep_duration * sample_rate)
         
         # Start continuous sampling if detectors are initialized
         if self.detector_ctrl:
             try:
-                sample_rate = int(self.ent_sample_rate.get().strip() or "200")
                 self.detector_ctrl.start_continuous_sampling(sample_rate_hz=sample_rate)
                 self.log(f"Continuous sampling started at {sample_rate} Hz")
             except Exception as e:
@@ -1397,11 +1576,10 @@ class LaserSweepApp:
             # Start the repeat scan
             self.ctrl.start_repeat_sweep(p['laser'])
             self.log("Repeat scan started.")
+            n_scans = p['scans']
+            self.root.after(0, lambda: self._set_experiment_status(f"Experiment: Running — starting (0/{n_scans} scans)"))
             time.sleep(0.2)  # Brief pause to allow sweep to start
 
-            # Time-based throttle for visualization updates (e.g. ~20 FPS max)
-            viz_interval_s = 0.05  # 50 ms between redraws
-            last_viz_time = 0.0
             first_stored_logged = True
             start_aligned = True
             last_stored_ts_current_scan = None  # O(1) completion check: avoid scanning full detector_data each iteration
@@ -1412,6 +1590,7 @@ class LaserSweepApp:
             status_0_required = max(5, int(0.2 / poll_interval_s))  # ~0.2 s of status=0
 
             # Monitor sweep and count completed scans
+            main_loop_skipped_cycle_cap = 0  # two-way: count skips due to elapsed > cycle_time
             while completed_scans < p['scans']:
                 if self.stop_flag:
                     self.ctrl.stop_continuous_sweep(p['laser'])
@@ -1428,19 +1607,36 @@ class LaserSweepApp:
                         if sweep_start_time is None:
                             sweep_start_time = scan_start_time
                         self.current_scan = completed_scans + 1
+                        cur, n = self.current_scan, p['scans']
+                        self.root.after(0, lambda c=cur, tot=n: self._set_experiment_status(f"Experiment: Running — scan {c}/{tot}"))
                         first_stored_logged = False
                         start_aligned = False
                         last_stored_ts_current_scan = None
                         last_stored_wl_current_scan = None
+                        main_loop_skipped_cycle_cap = 0
+                        points_stored_this_scan = 0
+                        expected_pts_this_scan = expected_points_one_way if p['mode'] == 1 else expected_points_two_way
                         # Re-sync detector timestamps to wall clock so samples after delay are not skipped
                         if self.detector_ctrl and self.detector_ctrl.continuous_running:
                             self.detector_ctrl.reset_continuous_timeline()
+                        # #region agent log
+                        if p['mode'] != 1:
+                            _ct = 2 * sweep_duration
+                            try:
+                                _f = open("debug-7fa4f7.log", "a")
+                                _f.write('{"sessionId":"7fa4f7","hypothesisId":"H4","location":"main.py:scan_start","message":"two-way scan start","data":{"cycle_time":%s,"sweep_duration":%s,"sample_rate":%s,"expected_two_way":%s},"timestamp":%d}\n' % (_ct, sweep_duration, sample_rate, expected_points_two_way, int(time.time()*1000)))
+                                _f.close()
+                            except Exception: pass
+                        # #endregion
                 
                 # Read continuous samples and correlate with wavelength
                 if self.detector_ctrl and self.detector_ctrl.continuous_running:
                     try:
-                        samples1, samples2, timestamps = self.detector_ctrl.read_continuous_samples()
+                        samples1, samples2, samples3, timestamps = self.detector_ctrl.read_continuous_samples()
                         if samples1 is not None and len(samples1) > 0 and scan_start_time is not None:
+                            if samples3 is not None and len(samples3) > 0:
+                                self._latest_pda100a2_voltage = float(samples3[-1])
+                            self._latest_pda50b2_voltage = float(samples1[-1])
                             for i, ts in enumerate(timestamps):
                                 elapsed = ts - scan_start_time
                                 # Skip pre-start buffer (fixes scan 2 wrong first point and negative elapsed)
@@ -1458,15 +1654,16 @@ class LaserSweepApp:
                                         first_stored_logged = True
                                 else:
                                     elapsed = ts - scan_start_time
-                                    if p['mode'] == 1:  # One-way
-                                        if elapsed <= sweep_duration:
-                                            wavelength = p['start'] + (elapsed / sweep_duration) * wavelength_range
-                                        else:
-                                            wavelength = p['end']
-                                    else:  # Two-way
+                                    if p['mode'] == 1:  # One-way: only store within sweep window to get exact expected count
+                                        if elapsed > sweep_duration:
+                                            continue
+                                        wavelength = p['start'] + (elapsed / sweep_duration) * wavelength_range
+                                    else:  # Two-way: only store within one full cycle to get exact expected count
                                         cycle_time = 2 * sweep_duration
+                                        if elapsed > cycle_time:
+                                            main_loop_skipped_cycle_cap += 1
+                                            continue
                                         if elapsed >= cycle_time:
-                                            # Past one full cycle: hold at start (avoid wrap giving 1300→1302 bump)
                                             wavelength = p['start']
                                         else:
                                             cycle_pos = elapsed / cycle_time
@@ -1478,6 +1675,9 @@ class LaserSweepApp:
                                         print(f"[DIAG start] scan={self.current_scan} first_stored: ts={ts:.4f} elapsed={elapsed:.4f}s wl={wavelength:.4f}")
                                         first_stored_logged = True
                                 
+                                # Hard cap: never store more than expected points per scan.
+                                if points_stored_this_scan >= expected_pts_this_scan:
+                                    continue
                                 # Store data for both detectors
                                 self.detector_data['PDA50B2']['voltages'].append(float(samples1[i]))
                                 self.detector_data['PDA50B2']['wavelengths'].append(wavelength)
@@ -1490,12 +1690,7 @@ class LaserSweepApp:
                                 self.detector_data['PDA10CS2']['wavelengths'].append(wavelength)
                                 self.detector_data['PDA10CS2']['scans'].append(self.current_scan)
                                 self.detector_data['PDA10CS2']['timestamps'].append(ts)
-                            
-                            # Update visualization at most every viz_interval_s (time-based throttle)
-                            now = time.time()
-                            if now - last_viz_time >= viz_interval_s:
-                                last_viz_time = now
-                                self.root.after(0, self._update_visualization)
+                                points_stored_this_scan += 1
                     except Exception as e:
                         # Silently handle read errors during continuous sampling
                         pass
@@ -1508,7 +1703,10 @@ class LaserSweepApp:
 
                 elapsed_s = (time.time() - scan_start_time) if scan_start_time is not None else 0.0
                 expected_cycle_s = 2 * sweep_duration if p['mode'] != 1 else sweep_duration
-                min_elapsed_for_complete = (1.02 * expected_cycle_s) if p['mode'] != 1 else 0.0
+                # Two-way: we cap stored data at elapsed <= cycle_time. With discrete sampling the last sample
+                # is at cycle_time - dt, so allow completion when within one sample period of full cycle.
+                sample_period = 1.0 / sample_rate
+                min_elapsed_for_complete = max(0.0, expected_cycle_s - sample_period) if p['mode'] != 1 else 0.0
 
                 # Two-way: gate completion on *data* time (last stored sample). Use O(1) tracked values.
                 wl_near_start_ok = True
@@ -1523,22 +1721,31 @@ class LaserSweepApp:
                         elapsed_data_s = 0.0
                     if elapsed_s >= 1.15 * expected_cycle_s:
                         wl_near_start_ok = True  # wall-clock fallback to avoid stuck
-
                 elapsed_ok = elapsed_data_s >= min_elapsed_for_complete
-                force_complete = sweep_running and elapsed_data_s >= (1.02 * expected_cycle_s)
+                # Two-way: when data arrives faster than nominal we hit point cap before min_elapsed; allow completion by wall clock.
+                if p['mode'] != 1 and sweep_running and points_stored_this_scan >= expected_points_two_way and elapsed_s >= expected_cycle_s:
+                    elapsed_ok = True
+                force_complete = sweep_running and (
+                    elapsed_data_s >= expected_cycle_s if p['mode'] == 1
+                    else (elapsed_data_s >= min_elapsed_for_complete or (points_stored_this_scan >= expected_points_two_way and elapsed_s >= expected_cycle_s))
+                )
 
                 # Only declare complete when status=0 for debounce period AND (two-way) elapsed >= full cycle AND last wl near start
                 if ((status == 0 and sweep_running and status_0_debounce_count >= status_0_required and elapsed_ok) or force_complete) and wl_near_start_ok:
-                    # Drain buffer for this scan before declaring complete (so every scan gets full data)
+                    # Drain buffer for this scan before declaring complete (so every scan gets full data).
+                    # Only add samples with ts > last_stored_ts_current_scan to avoid double-counting.
                     drain_scan_start_time = scan_start_time
                     drain_current_scan = self.current_scan
+                    drain_ts_cutoff = last_stored_ts_current_scan  # Only append drain samples after this
+                    drain_expected_pts = expected_points_one_way if p['mode'] == 1 else expected_points_two_way
                     if self.detector_ctrl and self.detector_ctrl.continuous_running and drain_scan_start_time is not None:
                         drain_added = 0
+                        n_pts_before_drain = sum(1 for s in self.detector_data['PDA50B2']['scans'] if s == drain_current_scan)
                         empty_reads = 0
                         max_empty = 1  # Exit after one empty read to minimize gap between scans
                         for _ in range(50):
                             try:
-                                s1, s2, timestamps = self.detector_ctrl.read_continuous_samples(timeout=0.15)
+                                s1, s2, s3, timestamps = self.detector_ctrl.read_continuous_samples(timeout=0.15)
                                 if s1 is None or len(s1) == 0:
                                     empty_reads += 1
                                     if empty_reads >= max_empty:
@@ -1547,16 +1754,21 @@ class LaserSweepApp:
                                     continue
                                 empty_reads = 0
                                 for i, ts in enumerate(timestamps):
+                                    if n_pts_before_drain + drain_added >= drain_expected_pts:
+                                        break  # Hard cap: don't add more than expected per scan
+                                    if drain_ts_cutoff is not None and ts <= drain_ts_cutoff:
+                                        continue  # Already stored by main loop; avoid duplicate
                                     elapsed = ts - drain_scan_start_time
                                     if elapsed < 0:
                                         continue
-                                    if p['mode'] == 1:
-                                        if elapsed <= sweep_duration:
-                                            wavelength = p['start'] + (elapsed / sweep_duration) * wavelength_range
-                                        else:
-                                            wavelength = p['end']
-                                    else:
+                                    if p['mode'] == 1:  # One-way: only add drain samples within sweep window
+                                        if elapsed > sweep_duration:
+                                            continue
+                                        wavelength = p['start'] + (elapsed / sweep_duration) * wavelength_range
+                                    else:  # Two-way: only add drain samples within one full cycle
                                         cycle_time = 2 * sweep_duration
+                                        if elapsed > cycle_time:
+                                            continue
                                         if elapsed >= cycle_time:
                                             wavelength = p['start']
                                         else:
@@ -1574,12 +1786,17 @@ class LaserSweepApp:
                                     self.detector_data['PDA10CS2']['scans'].append(drain_current_scan)
                                     self.detector_data['PDA10CS2']['timestamps'].append(ts)
                                     drain_added += 1
+                                if n_pts_before_drain + drain_added >= drain_expected_pts:
+                                    break
+                                if s3 is not None and len(s3) > 0:
+                                    self._latest_pda100a2_voltage = float(s3[-1])
                                 time.sleep(0.02)
                             except Exception:
                                 break
+                        expected_pts = expected_points_one_way if p['mode'] == 1 else expected_points_two_way
+                        print(f"[DIAG drain] scan={drain_current_scan}  points_added={drain_added}  expected_this_scan={expected_pts}")
                         if drain_added > 0:
                             self.log(f"Drain complete: {drain_added} points added to scan {drain_current_scan}.")
-                            print(f"[DIAG drain] scan={drain_current_scan}  points_added={drain_added}")
 
                     # 0-point guard: only count scan complete if we have at least one point
                     det = 'PDA50B2'
@@ -1587,6 +1804,17 @@ class LaserSweepApp:
                     sc_arr = np.array(self.detector_data[det]['scans'])
                     mask = (sc_arr == drain_current_scan)
                     n_pts = int(np.sum(mask))
+                    expected_pts = expected_points_one_way if p['mode'] == 1 else expected_points_two_way
+                    # #region agent log
+                    if p['mode'] != 1:
+                        try:
+                            _el = (last_stored_ts_current_scan - drain_scan_start_time) if (drain_scan_start_time is not None and last_stored_ts_current_scan is not None) else None
+                            _elj = "null" if _el is None else ("%.4f" % _el)
+                            _f = open("debug-7fa4f7.log", "a")
+                            _f.write('{"sessionId":"7fa4f7","hypothesisId":"H1,H2,H3,H5","location":"main.py:scan_complete","message":"two-way completion","data":{"scan":%s,"n_pts":%s,"expected_pts":%s,"drain_added":%s,"main_loop_skipped_cycle_cap":%s,"last_stored_elapsed_s":%s},"timestamp":%d}\n' % (drain_current_scan, n_pts, expected_pts, drain_added, main_loop_skipped_cycle_cap, _elj, int(time.time()*1000)))
+                            _f.close()
+                        except Exception: pass
+                    # #endregion
 
                     if n_pts == 0:
                         self.log(f"Warning: scan {drain_current_scan} has 0 points; not counting as complete, retrying sweep.")
@@ -1599,10 +1827,13 @@ class LaserSweepApp:
                             time.sleep(0.2)
                     else:
                         completed_scans += 1
+                        done, tot = completed_scans, p['scans']
+                        self.root.after(0, lambda d=done, t=tot: self._set_experiment_status(f"Experiment: Running — scan {d}/{t} completed"))
                         last_idx = np.where(mask)[0][-1]
                         last_wl = float(wl_arr[last_idx])
-                        print(f"[DIAG end] scan={completed_scans}  points={n_pts}  last_stored_wl={last_wl:.4f}  elapsed_since_start={elapsed_s:.3f}s  expected_cycle_s={expected_cycle_s:.3f}")
+                        print(f"[DIAG end] scan={completed_scans}  points={n_pts}  expected={expected_pts}  last_stored_wl={last_wl:.4f}  elapsed_since_start={elapsed_s:.3f}s  expected_cycle_s={expected_cycle_s:.3f}")
                         self.log(f"Scan {completed_scans}/{p['scans']} completed.")
+                        self.root.after(0, self._update_visualization)
                         sweep_running = False
                         scan_start_time = None
                         status_0_debounce_count = 0
@@ -1645,6 +1876,7 @@ class LaserSweepApp:
                 pass
             self.log("Continuous sweep done.")
             self.stop_flag = False
+            self.root.after(0, lambda: self._set_experiment_status("Experiment: Idle"))
             # Final visualization update
             if self.detector_ctrl:
                 self.root.after(0, self._update_visualization)
@@ -1655,6 +1887,8 @@ class LaserSweepApp:
         self.log(f"--- Starting Sweep ---")
         total_up = p['up_pix'] * p['up_sub']
         total_down = p['down_pix'] * p['down_sub']
+        n_scans = p['scans']
+        self.root.after(0, lambda: self._set_experiment_status(f"Experiment: Running — starting (0/{n_scans} scans)"))
         
         # Initialize scan counter
         self.current_scan = 0
@@ -1666,6 +1900,8 @@ class LaserSweepApp:
             for i in range(p['scans']):
                 if self.stop_flag: break
                 self.current_scan = i + 1
+                cur, tot = self.current_scan, p['scans']
+                self.root.after(0, lambda c=cur, t=tot: self._set_experiment_status(f"Experiment: Running — scan {c}/{t}"))
                 self.log(f"Scan {i+1}/{p['scans']}")
 
                 if total_up > 0:
@@ -1679,7 +1915,13 @@ class LaserSweepApp:
                         # Read detectors if initialized
                         if self.detector_ctrl:
                             try:
-                                v1, v2 = self.detector_ctrl.read_both_detectors()
+                                if self.detector_ctrl.channel3:
+                                    v1, v2, v3 = self.detector_ctrl.read_three_detectors()
+                                    self._latest_pda50b2_voltage = v1
+                                    self._latest_pda100a2_voltage = v3
+                                else:
+                                    v1, v2 = self.detector_ctrl.read_both_detectors()
+                                    self._latest_pda50b2_voltage = v1
                                 self.detector_data['PDA50B2']['voltages'].append(v1)
                                 self.detector_data['PDA50B2']['wavelengths'].append(current_wavelength)
                                 self.detector_data['PDA50B2']['scans'].append(self.current_scan)
@@ -1689,10 +1931,6 @@ class LaserSweepApp:
                                 self.detector_data['PDA10CS2']['wavelengths'].append(current_wavelength)
                                 self.detector_data['PDA10CS2']['scans'].append(self.current_scan)
                                 self.detector_data['PDA10CS2']['timestamps'].append(time.time())
-                                
-                                # Update visualization periodically (every 10 steps)
-                                if step % 10 == 0:
-                                    self.root.after(0, self._update_visualization)
                             except Exception as e:
                                 self.log(f"Warning: Detector read error: {e}")
                         
@@ -1713,7 +1951,13 @@ class LaserSweepApp:
                         # Read detectors if initialized
                         if self.detector_ctrl:
                             try:
-                                v1, v2 = self.detector_ctrl.read_both_detectors()
+                                if self.detector_ctrl.channel3:
+                                    v1, v2, v3 = self.detector_ctrl.read_three_detectors()
+                                    self._latest_pda50b2_voltage = v1
+                                    self._latest_pda100a2_voltage = v3
+                                else:
+                                    v1, v2 = self.detector_ctrl.read_both_detectors()
+                                    self._latest_pda50b2_voltage = v1
                                 self.detector_data['PDA50B2']['voltages'].append(v1)
                                 self.detector_data['PDA50B2']['wavelengths'].append(current_wavelength)
                                 self.detector_data['PDA50B2']['scans'].append(self.current_scan)
@@ -1723,10 +1967,6 @@ class LaserSweepApp:
                                 self.detector_data['PDA10CS2']['wavelengths'].append(current_wavelength)
                                 self.detector_data['PDA10CS2']['scans'].append(self.current_scan)
                                 self.detector_data['PDA10CS2']['timestamps'].append(time.time())
-                                
-                                # Update visualization periodically
-                                if step % 10 == 0:
-                                    self.root.after(0, self._update_visualization)
                             except Exception as e:
                                 self.log(f"Warning: Detector read error: {e}")
                         
@@ -1749,6 +1989,7 @@ class LaserSweepApp:
         finally:
             self.log("Done.")
             self.stop_flag = False
+            self.root.after(0, lambda: self._set_experiment_status("Experiment: Idle"))
             # Final visualization update
             if self.detector_ctrl:
                 self.root.after(0, self._update_visualization)
@@ -1757,6 +1998,12 @@ class LaserSweepApp:
     # --- CORRECTED: Defined INSIDE the class ---
     def on_closing(self):
         self.stop_flag = True
+        if self.power_monitor_window is not None and self.power_monitor_window.winfo_exists():
+            try:
+                self.power_monitor_window.destroy()
+            except Exception:
+                pass
+            self.power_monitor_window = None
         # Stop any running continuous sweeps
         if hasattr(self, 'cont_sweep_params'):
             try:

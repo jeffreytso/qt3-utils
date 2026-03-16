@@ -75,7 +75,7 @@ class NidaqPositionController(NidaqVoltageController):
                  read_channel: str = None,
                  move_settle_time: float = 0.0,
                  scale_microns_per_volt: float=8,
-                 zero_microns_volt_offset: float=5,
+                 zero_microns_volt_offset: float=0,
                  min_position: float = -40.0,
                  max_position: float = 40.0,
                  invert_axis: bool = False) -> None:
@@ -86,7 +86,7 @@ class NidaqPositionController(NidaqVoltageController):
         self.max_position = max_position
         self.settling_time_in_seconds = move_settle_time
         self.invert_axis = invert_axis
-        self._last_position_microns = None  # Display shows this; MON ignored for display
+        self._last_position_microns = None  # Used when no read_channel; else MON drives display
 
         # Invert the axis if specified by self.modifying scale_microns_per_volt
         # and self.zero_microns_volt_offset.
@@ -192,13 +192,19 @@ class NidaqPositionController(NidaqVoltageController):
 
     def get_current_position(self) -> float:
         '''
-        Returns the last commanded position (µm) for display. MON is not used so
-        the GUI "Current" matches the value you set. Before any move, falls back
-        to voltage-derived position (MON or last write) if available.
+        Returns position (µm) for the "Previous Value" display.
+        When read_channel (MON) is configured, reads from the MON cable so the
+        display shows actual feedback. Otherwise uses last commanded position
+        (or voltage-derived position if available).
         '''
+        if self.read_channel is not None:
+            try:
+                v = self.get_current_voltage()
+                return self._volts_to_microns(v)
+            except Exception:
+                pass
         if self._last_position_microns is not None:
             return self._last_position_microns
-        # Before any Set Position: use voltage-derived position (MON or last write)
         try:
             v = self.get_current_voltage()
             return self._volts_to_microns(v)

@@ -22,7 +22,7 @@ QDLMOVE:
     configure:
       device_name: Dev1
       write_channel: ao0
-      read_channel: 
+      read_channel: ai7   # MON cable for X (channel 4) – used for Previous Value display
       move_settle_time: 0.0
       scale_microns_per_volt: 8  # 1:1 so value = voltage (0–10 V)
       zero_microns_volt_offset: 0
@@ -36,7 +36,7 @@ QDLMOVE:
     configure:
       device_name: Dev1
       write_channel: ao1
-      read_channel: 
+      read_channel: ai4   # MON cable for Y (channel 7) – used for Previous Value display 
       move_settle_time: 0.0
       scale_microns_per_volt: 8    # 1:1 so value = voltage (0–10 V)
       zero_microns_volt_offset: 0

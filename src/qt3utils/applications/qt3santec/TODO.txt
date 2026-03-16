@@ -1,9 +1,11 @@
 
 
-1. Fix continuous sweep: right now the problem is simply too much data, it slows everything down (the updating, the storage, etc).
-Few things to figure out
-    - do we really need such a high sampling rate? having fewer data points could solve this problem
-    - do we need live updates to the graphs? if we could just draw all the points at the very end it wouldn't lag as much
-    - how large is the scale of experiments going to be? how much data do we need stored at once? how wide do we need our scans?
-2. Ask chunchi about heat map
-3. Export txt file
+2. Heat map: y axis is wavelength and color bar is voltage
+3. Add warning for users if points exceed capacity
+
+
+
+
+2. make sure qt3scan is working
+3. use function generator to connect to DAQ counter channel and store pulses
+4. integrate into qt3move
