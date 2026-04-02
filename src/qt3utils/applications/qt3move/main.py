@@ -4,6 +4,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import yaml
 import os
+
+from qt3utils.config_loader import merge_shared_positioners_into_app_config
+
 from microstage.encoderless_wrapper import EncoderlessMicrostage
 from piezo.nidaq_position import NidaqPositionController
 
@@ -144,6 +147,8 @@ class Qt3MoveApp(tk.Tk):
         try:
             with open(config_file, 'r') as file:
                 config = yaml.safe_load(file)
+            if config:
+                merge_shared_positioners_into_app_config(config)
             print(f"Loaded configuration from: {config_file}")
             return config
         except FileNotFoundError:
@@ -1002,5 +1007,10 @@ class Qt3MoveApp(tk.Tk):
         self.destroy()
 
 if __name__ == "__main__":
+    from qt3utils.applications.exclusive_stage_apps import (
+        exit_if_exclusive_lock_held_by_other,
+    )
+
+    exit_if_exclusive_lock_held_by_other('qt3move')
     app = Qt3MoveApp(config_file=CONFIG_FILE)
     app.mainloop()

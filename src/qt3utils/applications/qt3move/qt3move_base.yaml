@@ -1,60 +1,23 @@
 QDLMOVE:
-  Positioners:      # Add positioner configs defiend below; edit the GUI/application accordingly.
+  Positioners:      # Add positioner configs defined in qt3utils.config_files.qt3_positioners_shared
     - Microstage
-    - PiezoX      # Commented out for testing without piezo hardware
+    - PiezoX
     - PiezoY
-    # - PiezoZ   # Temporarily disabled
+    # - PiezoZ   # Enable in Positioners if Z piezo is wired
 
-  Microstage:
-    import_path : microstage.encoderless_wrapper
-    class_name  : EncoderlessMicrostage
-    configure :
-      x_min: 0.0        # Minimum position in microns
-      x_max: 12000.0    # Maximum position in microns
-      y_min: 0.0        # Minimum position in microns
-      y_max: 12000.0    # Maximum position in microns
-      velocity: 0.5   # Speed in mm/s
-
-  # Raw voltage passthrough: GUI "position" = 0–10 V. Set/Current display volts for CLE verification.
-  PiezoX:
-    import_path : piezo.nidaq_position
-    class_name  : NidaqPositionController
-    configure:
+  SignalAcquisition:
+    mode: analog   # 'analog' or 'counter'
+    analog:
       device_name: Dev1
-      write_channel: ao0
-      read_channel: ai7   # MON cable for X (channel 4) – used for Previous Value display
-      move_settle_time: 0.0
-      scale_microns_per_volt: 8  # 1:1 so value = voltage (0–10 V)
-      zero_microns_volt_offset: 0
-      min_position: 0.0             # 0 V
-      max_position: 80.0            # 10 V
-      invert_axis: False
-
-  PiezoY:
-    import_path : piezo.nidaq_position
-    class_name  : NidaqPositionController
-    configure:
+      ai_channel: ai7   # Default analog input channel for signal
+      scale_factor: 1.0   # Multiply raw volts to get display units
+      units: "V"
+    counter:
       device_name: Dev1
-      write_channel: ao1
-      read_channel: ai4   # MON cable for Y (channel 7) – used for Previous Value display 
-      move_settle_time: 0.0
-      scale_microns_per_volt: 8    # 1:1 so value = voltage (0–10 V)
-      zero_microns_volt_offset: 0
-      min_position: 0.0             # 0 V
-      max_position: 80.0            # 10 V
-      invert_axis: False
-
-  # PiezoZ temporarily disabled (same 0–10 V raw when re-enabling)
-  # PiezoZ:
-  #   import_path : piezo.nidaq_position
-  #   class_name  : NidaqPositionController
-  #   configure:
-  #     device_name: Dev1
-  #     write_channel: ao2
-  #     read_channel: ai5
-  #     move_settle_time: 0.0
-  #     scale_microns_per_volt: 1
-  #     zero_microns_volt_offset: 0
-  #     min_position: 0.0
-  #     max_position: 10.0
-  #     invert_axis: False
+      signal_terminal: PFI0    # NI DAQ terminal connected to TTL pulses
+      clock_terminal: ""       # Optional DI terminal for external clock; empty = use internal DI clock
+      clock_rate: 100000       # Hz, used if internal clock is configured
+      signal_counter: ctr0     # Counter channel used for counting pulses
+      samples_per_batch: 1000  # Number of samples per read for rate estimation
+      read_timeout: 5.0        # Seconds
+      units: "counts/s"

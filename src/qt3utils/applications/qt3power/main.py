@@ -1,9 +1,54 @@
 import tkinter as tk
 from tkinter import messagebox
 import time
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import nidaqmx
+
+from qt3utils.applications.qt3_daq_busy_marker import santec_daq_busy
+
+_STALE_LOCK_TOOLTIP = (
+    "Only use this when qt3santec is not scanning but the busy marker was left behind "
+    "(e.g. after a crash or force-close). Do not enable during an active Santec sweep—"
+    "both apps may touch the same DAQ channels and cause errors."
+)
+
+
+def _attach_tooltip(widget: tk.Widget, text: str) -> None:
+    """Show text in a borderless Toplevel while the pointer is over widget."""
+    tip_window: Dict[str, Optional[tk.Toplevel]] = {"w": None}
+
+    def on_enter(_event: object) -> None:
+        if tip_window["w"] is not None:
+            return
+        x = widget.winfo_rootx() + 20
+        y = widget.winfo_rooty() + widget.winfo_height() + 2
+        tw = tk.Toplevel(widget)
+        tip_window["w"] = tw
+        tw.wm_overrideredirect(True)
+        tw.attributes("-topmost", True)
+        tw.wm_geometry(f"+{x}+{y}")
+        lbl = tk.Label(
+            tw,
+            text=text,
+            justify="left",
+            background="#ffffe0",
+            relief="solid",
+            borderwidth=1,
+            padx=6,
+            pady=4,
+            font=("Arial", 9),
+        )
+        lbl.pack()
+
+    def on_leave(_event: object) -> None:
+        tw = tip_window["w"]
+        tip_window["w"] = None
+        if tw is not None:
+            tw.destroy()
+
+    widget.bind("<Enter>", on_enter)
+    widget.bind("<Leave>", on_leave)
 
 
 class PhotodetectorController:
@@ -88,6 +133,7 @@ class PowerMonitorApp:
         self.detector_ctrl: Optional[PhotodetectorController] = None
         self.running = False
         self.update_interval_ms = 200  # ~5 Hz polling
+        self.var_ignore_santec_lock = tk.BooleanVar(value=False)
 
         self._build_gui()
 
@@ -216,6 +262,15 @@ class PowerMonitorApp:
         self.lbl_run_status = tk.Label(ctrl_frame, text="Monitor: Stopped")
         self.lbl_run_status.pack(side="left", padx=15)
 
+        stale_lock_label = "Stale lock: allow DAQ reads anyway (unsafe if Santec is scanning)"
+        self.chk_ignore_lock = tk.Checkbutton(
+            ctrl_frame,
+            text=stale_lock_label,
+            variable=self.var_ignore_santec_lock,
+        )
+        self.chk_ignore_lock.pack(side="left", padx=10)
+        _attach_tooltip(self.chk_ignore_lock, _STALE_LOCK_TOOLTIP)
+
     def init_daq(self) -> None:
         """Initialize the DAQ and test read once."""
         device = self.ent_device.get().strip()
@@ -224,6 +279,15 @@ class PowerMonitorApp:
 
         if not device or not ch1 or not ch2:
             messagebox.showerror("Error", "Please specify DAQ device and both channels.")
+            return
+
+        if santec_daq_busy() and not self.var_ignore_santec_lock.get():
+            messagebox.showwarning(
+                "Santec scanning",
+                "qt3santec has the DAQ (scan in progress). Stop the scan or enable "
+                "'Stale lock: allow DAQ reads anyway (unsafe if Santec is scanning)' "
+                "only if you are sure the marker is stale—not during a real sweep.",
+            )
             return
 
         try:
@@ -258,6 +322,18 @@ class PowerMonitorApp:
         """Convert voltage (V) to power (MW) using fixed calibration."""
         return voltage / self.VOLT_TO_MW_FACTOR
 
+    def _set_power_widgets_paused(self, paused: bool) -> None:
+        if paused:
+            self.lbl_pda50b2_power.config(fg="#888888")
+            self.lbl_pda100a2_power.config(fg="#888888")
+            self.lbl_pda50b2_voltage.config(fg="#888888")
+            self.lbl_pda100a2_voltage.config(fg="#888888")
+        else:
+            self.lbl_pda50b2_power.config(fg="#0044aa")
+            self.lbl_pda100a2_power.config(fg="#006600")
+            self.lbl_pda50b2_voltage.config(fg="black")
+            self.lbl_pda100a2_voltage.config(fg="black")
+
     def start_monitoring(self) -> None:
         if self.detector_ctrl is None:
             messagebox.showerror("Error", "Initialize DAQ before starting monitoring.")
@@ -273,6 +349,7 @@ class PowerMonitorApp:
 
     def stop_monitoring(self) -> None:
         self.running = False
+        self._set_power_widgets_paused(False)
         self.btn_start.config(state="normal" if self.detector_ctrl else "disabled")
         self.btn_stop.config(state="disabled")
         self.lbl_run_status.config(text="Monitor: Stopped")
@@ -286,14 +363,22 @@ class PowerMonitorApp:
             return
 
         try:
-            v1, v2 = self.detector_ctrl.read_both_detectors()
-            p1 = self._voltage_to_mw(v1)
-            p2 = self._voltage_to_mw(v2)
+            if santec_daq_busy() and not self.var_ignore_santec_lock.get():
+                self.lbl_run_status.config(
+                    text="Monitor: Running — paused (Santec scan, DAQ shared)",
+                )
+                self._set_power_widgets_paused(True)
+            else:
+                self.lbl_run_status.config(text="Monitor: Running")
+                self._set_power_widgets_paused(False)
+                v1, v2 = self.detector_ctrl.read_both_detectors()
+                p1 = self._voltage_to_mw(v1)
+                p2 = self._voltage_to_mw(v2)
 
-            self.lbl_pda50b2_voltage.config(text=f"{v1:.4f}")
-            self.lbl_pda100a2_voltage.config(text=f"{v2:.4f}")
-            self.lbl_pda50b2_power.config(text=f"{p1:.4f}")
-            self.lbl_pda100a2_power.config(text=f"{p2:.4f}")
+                self.lbl_pda50b2_voltage.config(text=f"{v1:.4f}")
+                self.lbl_pda100a2_voltage.config(text=f"{v2:.4f}")
+                self.lbl_pda50b2_power.config(text=f"{p1:.4f}")
+                self.lbl_pda100a2_power.config(text=f"{p2:.4f}")
 
             self.lbl_status.config(fg="green")
         except Exception as e:

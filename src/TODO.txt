@@ -1,0 +1,17 @@
+1. Copy over qdlscan, everything is same except:
+    - replace their separate piezo mover with ours (with microstage)
+    - For them, their detector is just a counter channel detector.
+        We want three options, analogue photodiode in the back, SNSPD channel (check manual in drive)
+        and a third counter channel (won't receive anything for now but just plan to have as option)
+
+2. Make sure theres no unused code in qt3utils and its maintainable for future use
+
+3. For transmission: Heat map, y axis is wavelength and color bar is voltage
+    Add warning for users if points exceed capacity
+
+4. Create qt3home with: qt3move, qt3scan, qt3santec, qt3power,
+    and qt3scope (same as qdlutils except instead of only one detector we have the 3 options)
+
+5. qt3chromatune is unused, but document its existence in case need for future.
+
+6. When new piezo arrives test again

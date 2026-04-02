@@ -1,13 +1,27 @@
 # use ctypes for easy access to dll
 from ctypes import *
 import os
+from pathlib import Path
+
+import qt3utils
+
+
+def _microdrive_dll_directory() -> Path:
+    """Directory containing MicroDrive.dll (same package as qt3_positioners_shared.yaml)."""
+    return Path(qt3utils.__file__).resolve().parent / 'config_files'
+
 
 class MCL_Microdrive:
-    
-    def __init__(self):
-        os.add_dll_directory(os.getcwd())
 
-        #load the dll
+    def __init__(self):
+        dll_dir = _microdrive_dll_directory()
+        if hasattr(os, 'add_dll_directory'):
+            if dll_dir.is_dir():
+                os.add_dll_directory(str(dll_dir))
+            else:
+                os.add_dll_directory(os.getcwd())
+
+        # load the dll
         self.dll = cdll.MicroDrive
 
         self.dll.MCL_ReleaseHandle.restype = None

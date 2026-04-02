@@ -1,0 +1,23 @@
+QT3SCAN:
+  ApplicationController:
+    import_path : qt3utils.applications.qt3scan.application_controller
+    class_name : ScanController
+    hardware :
+      counter : Counter
+      x_axis_control : PiezoX
+      y_axis_control : PiezoY
+      z_axis_control : PiezoZ
+    configure :
+      inter_scan_settle_time : 0.01
+
+  Counter:
+    import_path : qt3utils.hardware.nidaq.counters.nidaqtimedratecounter
+    class_name  : NidaqTimedRateCounter
+    configure :
+      daq_name : Dev1
+      signal_terminal : PFI0
+      clock_terminal :
+      clock_rate: 100000
+      sample_time_in_seconds : 1
+      read_write_timeout : 10
+      signal_counter : ctr2

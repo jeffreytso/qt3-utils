@@ -12,6 +12,11 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
+from qt3utils.applications.qt3_daq_busy_marker import (
+    clear_santec_daq_busy,
+    mark_santec_daq_busy,
+)
+
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
@@ -40,7 +45,7 @@ class PhotodetectorController:
             device_name: NI DAQ device name (e.g., 'Dev1')
             channel1: Analog input channel for first detector (PDA50B2)
             channel2: Analog input channel for second detector (PDA10CS2)
-            channel3: Optional analog input for third detector (PDA100A2, for power monitor)
+            channel3: Optional analog input for third detector (PDA100A2)
             min_voltage: Minimum expected voltage
             max_voltage: Maximum expected voltage
         """
@@ -466,80 +471,6 @@ class SantecController:
             except: pass
 
 # ==============================================================================
-# POWER MONITOR WINDOW (Toplevel)
-# ==============================================================================
-VOLT_TO_MW_FACTOR = 7.0  # power_MW = voltage_V / 7.0 (fixed gain assumption)
-
-
-class PowerMonitorWindow(tk.Toplevel):
-    """
-    Separate window showing PDA50B2 and PDA100A2 power in MW.
-    Polls latest voltages from LaserSweepApp; never touches NI DAQ directly.
-    """
-    def __init__(self, parent, app):
-        super().__init__(parent)
-        self.app = app
-        self.title("Power Monitor")
-        self.minsize(400, 220)
-        self._update_interval_ms = 200
-        self._poll_id = None
-        
-        main_frame = tk.Frame(self)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        tk.Label(main_frame, text="Photodetector Power (MW)", font=("Arial", 11, "bold")).grid(
-            row=0, column=0, columnspan=2, pady=(0, 10))
-        
-        tk.Label(main_frame, text="PDA50B2 Power (MW):", font=("Arial", 10, "bold")).grid(
-            row=1, column=0, sticky="e", padx=5, pady=5)
-        self.lbl_pda50b2_power = tk.Label(main_frame, text="--", font=("Arial", 16, "bold"), fg="#0044aa")
-        self.lbl_pda50b2_power.grid(row=1, column=1, sticky="w", padx=5, pady=5)
-        tk.Label(main_frame, text="Voltage (V):").grid(row=2, column=0, sticky="e", padx=5, pady=2)
-        self.lbl_pda50b2_voltage = tk.Label(main_frame, text="--")
-        self.lbl_pda50b2_voltage.grid(row=2, column=1, sticky="w", padx=5, pady=2)
-        
-        tk.Label(main_frame, text="PDA100A2 Power (MW):", font=("Arial", 10, "bold")).grid(
-            row=3, column=0, sticky="e", padx=5, pady=10)
-        self.lbl_pda100a2_power = tk.Label(main_frame, text="--", font=("Arial", 16, "bold"), fg="#006600")
-        self.lbl_pda100a2_power.grid(row=3, column=1, sticky="w", padx=5, pady=10)
-        tk.Label(main_frame, text="Voltage (V):").grid(row=4, column=0, sticky="e", padx=5, pady=2)
-        self.lbl_pda100a2_voltage = tk.Label(main_frame, text="--")
-        self.lbl_pda100a2_voltage.grid(row=4, column=1, sticky="w", padx=5, pady=2)
-        
-        self.protocol("WM_DELETE_WINDOW", self._on_closing)
-        self._schedule_poll()
-    
-    def _voltage_to_mw(self, voltage):
-        if voltage is None:
-            return None
-        return voltage / VOLT_TO_MW_FACTOR
-    
-    def _poll(self):
-        self.app.sample_detectors_for_power_monitor()
-        v50 = self.app.get_latest_pda50b2_voltage()
-        v100 = self.app.get_latest_pda100a2_voltage()
-        p50 = self._voltage_to_mw(v50)
-        p100 = self._voltage_to_mw(v100)
-        self.lbl_pda50b2_voltage.config(text=f"{v50:.4f}" if v50 is not None else "--")
-        self.lbl_pda100a2_voltage.config(text=f"{v100:.4f}" if v100 is not None else "--")
-        self.lbl_pda50b2_power.config(text=f"{p50:.4f}" if p50 is not None else "--")
-        self.lbl_pda100a2_power.config(text=f"{p100:.4f}" if p100 is not None else "--")
-        self._schedule_poll()
-    
-    def _schedule_poll(self):
-        if self.winfo_exists():
-            self._poll_id = self.after(self._update_interval_ms, self._poll)
-    
-    def _on_closing(self):
-        if self._poll_id:
-            self.after_cancel(self._poll_id)
-            self._poll_id = None
-        if self.app.power_monitor_window is self:
-            self.app.power_monitor_window = None
-        self.destroy()
-
-
-# ==============================================================================
 # FRONTEND GUI
 # ==============================================================================
 class LaserSweepApp:
@@ -567,10 +498,6 @@ class LaserSweepApp:
             }
         }
         self.current_scan = 0
-        # Latest voltages for power monitor (PDA50B2, PDA100A2)
-        self._latest_pda50b2_voltage = None
-        self._latest_pda100a2_voltage = None
-        self.power_monitor_window = None
         
         self._build_gui()
 
@@ -620,9 +547,6 @@ class LaserSweepApp:
         self.btn_init_detectors.pack(side="left", padx=5, pady=5)
         self.lbl_detector_status = tk.Label(detector_btn_frame, text="Detectors: Not Initialized", fg="red")
         self.lbl_detector_status.pack(side="left", padx=5)
-        self.btn_open_power_monitor = tk.Button(detector_btn_frame, text="Open Power Monitor",
-                                               command=self._open_power_monitor, bg="#dddddd")
-        self.btn_open_power_monitor.pack(side="left", padx=5, pady=5)
 
         # Manual Control
         manual_frame = tk.LabelFrame(main_frame, text="Manual Control")
@@ -869,12 +793,9 @@ class LaserSweepApp:
             
             test_ctrl = PhotodetectorController(device_name, channel1, channel2, channel3=channel3)
             if channel3:
-                v1, v2, v3 = test_ctrl.read_three_detectors()
-                self._latest_pda50b2_voltage = v1
-                self._latest_pda100a2_voltage = v3
+                test_ctrl.read_three_detectors()
             else:
-                v1, v2 = test_ctrl.read_both_detectors()
-                self._latest_pda50b2_voltage = v1
+                test_ctrl.read_both_detectors()
             
             self.detector_ctrl = PhotodetectorController(device_name, channel1, channel2, channel3=channel3)
             self.lbl_detector_status.config(text="Detectors: Initialized", fg="green")
@@ -898,47 +819,6 @@ class LaserSweepApp:
         self._update_visualization()
         self.log("Detector data cleared.")
 
-    def get_latest_pda50b2_voltage(self):
-        """Return the most recent PDA50B2 voltage (V) for the power monitor, or None."""
-        if self._latest_pda50b2_voltage is not None:
-            return self._latest_pda50b2_voltage
-        if self.detector_data['PDA50B2']['voltages']:
-            return self.detector_data['PDA50B2']['voltages'][-1]
-        return None
-
-    def get_latest_pda100a2_voltage(self):
-        """Return the most recent PDA100A2 voltage (V) for the power monitor, or None."""
-        return self._latest_pda100a2_voltage
-
-    def sample_detectors_for_power_monitor(self):
-        """
-        Perform a one-shot DAQ read to update latest voltages for the power monitor.
-        Only runs when no sweep/continuous sampling is active (to avoid resource conflict).
-        """
-        if not self.detector_ctrl:
-            return
-        if self.detector_ctrl.continuous_running:
-            return
-        try:
-            if self.detector_ctrl.channel3:
-                v1, v2, v3 = self.detector_ctrl.read_three_detectors()
-                self._latest_pda50b2_voltage = v1
-                self._latest_pda100a2_voltage = v3
-            else:
-                v1, v2 = self.detector_ctrl.read_both_detectors()
-                self._latest_pda50b2_voltage = v1
-                # PDA100A2 not configured; leave _latest_pda100a2_voltage as is
-        except Exception:
-            pass
-
-    def _open_power_monitor(self):
-        """Create or bring to front the power monitor Toplevel window."""
-        if self.power_monitor_window is not None and self.power_monitor_window.winfo_exists():
-            self.power_monitor_window.lift()
-            self.power_monitor_window.focus_force()
-            return
-        self.power_monitor_window = PowerMonitorWindow(self.root, self)
-    
     def _set_experiment_status(self, text):
         """Update the experiment status label (call from main thread or via root.after(0, ...))."""
         if hasattr(self, 'lbl_experiment_status'):
@@ -1533,6 +1413,7 @@ class LaserSweepApp:
 
     def run_continuous_sweep(self):
         p = self.cont_sweep_params
+        mark_santec_daq_busy()
         self.log(f"--- Starting Continuous Sweep ---")
         self.log(f"Laser: {p['laser']['ip']} ({p['laser']['min']:.1f}-{p['laser']['max']:.1f} nm)")
         self.log(f"Range: {p['start']:.3f} - {p['end']:.3f} nm")
@@ -1634,9 +1515,6 @@ class LaserSweepApp:
                     try:
                         samples1, samples2, samples3, timestamps = self.detector_ctrl.read_continuous_samples()
                         if samples1 is not None and len(samples1) > 0 and scan_start_time is not None:
-                            if samples3 is not None and len(samples3) > 0:
-                                self._latest_pda100a2_voltage = float(samples3[-1])
-                            self._latest_pda50b2_voltage = float(samples1[-1])
                             for i, ts in enumerate(timestamps):
                                 elapsed = ts - scan_start_time
                                 # Skip pre-start buffer (fixes scan 2 wrong first point and negative elapsed)
@@ -1788,8 +1666,6 @@ class LaserSweepApp:
                                     drain_added += 1
                                 if n_pts_before_drain + drain_added >= drain_expected_pts:
                                     break
-                                if s3 is not None and len(s3) > 0:
-                                    self._latest_pda100a2_voltage = float(s3[-1])
                                 time.sleep(0.02)
                             except Exception:
                                 break
@@ -1863,6 +1739,7 @@ class LaserSweepApp:
         except Exception as e:
             self.log(f"Error: {e}")
         finally:
+            clear_santec_daq_busy()
             # Stop continuous sampling
             if self.detector_ctrl:
                 try:
@@ -1884,6 +1761,7 @@ class LaserSweepApp:
 
     def run_sweep(self):
         p = self.sweep_params
+        mark_santec_daq_busy()
         self.log(f"--- Starting Sweep ---")
         total_up = p['up_pix'] * p['up_sub']
         total_down = p['down_pix'] * p['down_sub']
@@ -1916,12 +1794,9 @@ class LaserSweepApp:
                         if self.detector_ctrl:
                             try:
                                 if self.detector_ctrl.channel3:
-                                    v1, v2, v3 = self.detector_ctrl.read_three_detectors()
-                                    self._latest_pda50b2_voltage = v1
-                                    self._latest_pda100a2_voltage = v3
+                                    v1, v2, _ = self.detector_ctrl.read_three_detectors()
                                 else:
                                     v1, v2 = self.detector_ctrl.read_both_detectors()
-                                    self._latest_pda50b2_voltage = v1
                                 self.detector_data['PDA50B2']['voltages'].append(v1)
                                 self.detector_data['PDA50B2']['wavelengths'].append(current_wavelength)
                                 self.detector_data['PDA50B2']['scans'].append(self.current_scan)
@@ -1952,12 +1827,9 @@ class LaserSweepApp:
                         if self.detector_ctrl:
                             try:
                                 if self.detector_ctrl.channel3:
-                                    v1, v2, v3 = self.detector_ctrl.read_three_detectors()
-                                    self._latest_pda50b2_voltage = v1
-                                    self._latest_pda100a2_voltage = v3
+                                    v1, v2, _ = self.detector_ctrl.read_three_detectors()
                                 else:
                                     v1, v2 = self.detector_ctrl.read_both_detectors()
-                                    self._latest_pda50b2_voltage = v1
                                 self.detector_data['PDA50B2']['voltages'].append(v1)
                                 self.detector_data['PDA50B2']['wavelengths'].append(current_wavelength)
                                 self.detector_data['PDA50B2']['scans'].append(self.current_scan)
@@ -1987,6 +1859,7 @@ class LaserSweepApp:
         except Exception as e:
             self.log(f"Error: {e}")
         finally:
+            clear_santec_daq_busy()
             self.log("Done.")
             self.stop_flag = False
             self.root.after(0, lambda: self._set_experiment_status("Experiment: Idle"))
@@ -1998,12 +1871,7 @@ class LaserSweepApp:
     # --- CORRECTED: Defined INSIDE the class ---
     def on_closing(self):
         self.stop_flag = True
-        if self.power_monitor_window is not None and self.power_monitor_window.winfo_exists():
-            try:
-                self.power_monitor_window.destroy()
-            except Exception:
-                pass
-            self.power_monitor_window = None
+        clear_santec_daq_busy()
         # Stop any running continuous sweeps
         if hasattr(self, 'cont_sweep_params'):
             try:
