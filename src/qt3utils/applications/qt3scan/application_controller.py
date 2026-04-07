@@ -3,7 +3,8 @@ import time
 
 import numpy as np
 
-from qt3utils.hardware.nidaq.counters.nidaqtimedratecounter import NidaqTimedRateCounter
+from qt3utils.applications.piezo_daq_lock import acquire_scanner, release_scanner
+from qt3utils.hardware.nidaq.timed_batch_signal_reader import TimedBatchSignalReader
 from qt3utils.hardware.nidaq.analogoutputs.nidaqposition import NidaqPositionController
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ class ScanController:
                  x_axis_controller: NidaqPositionController,
                  y_axis_controller: NidaqPositionController,
                  z_axis_controller: NidaqPositionController,
-                 counter_controller: NidaqTimedRateCounter,
+                 counter_controller: TimedBatchSignalReader,
                  inter_scan_settle_time: float=0.01):
 
         self.x_axis_controller = x_axis_controller
@@ -30,14 +31,19 @@ class ScanController:
 
         # On initialization move all position controllers to zero.
         # WARNING: it is assumed that the zero is a valid position of the DAQ
-        try:
-            # Set the positions to zero on start up, this is necessary as it establishes
-            # a `last_write_value` for the controllers so that the position is defined.
-            self._set_axis(axis_controller=self.x_axis_controller, position=0)
-            self._set_axis(axis_controller=self.y_axis_controller, position=0)
-            self._set_axis(axis_controller=self.z_axis_controller, position=0)
-        except Exception as e:
-            logger.warning(f'Could not zero axes on startup: {e}')
+        if acquire_scanner(blocking=True):
+            try:
+                # Set the positions to zero on start up, this is necessary as it establishes
+                # a `last_write_value` for the controllers so that the position is defined.
+                self._set_axis(axis_controller=self.x_axis_controller, position=0)
+                self._set_axis(axis_controller=self.y_axis_controller, position=0)
+                self._set_axis(axis_controller=self.z_axis_controller, position=0)
+            except Exception as e:
+                logger.warning(f'Could not zero axes on startup: {e}')
+            finally:
+                release_scanner()
+        else:
+            logger.warning('Could not acquire piezo DAQ lock to zero axes on startup')
 
 
         # This is a flag to keep track of if the controller is currently busy
@@ -73,26 +79,27 @@ class ScanController:
         # Block action if busy
         if self.busy:
             raise RuntimeError('Application controller is currently in use.')
-        # Reserve the controller
+        if not acquire_scanner(blocking=True):
+            raise RuntimeError('Could not acquire piezo DAQ lock')
         self.busy = True
-
-        # Get the axis controller depending on which axis is requested
-        if axis == 'x':
-            axis_controller = self.x_axis_controller
-        elif axis == 'y':
-            axis_controller = self.y_axis_controller
-        elif axis == 'z':
-            axis_controller = self.z_axis_controller
-        else:
-            raise ValueError(f'Requested axis {axis} is invalid.')
-        
-        # Call the internal movement function
         try:
-            self._set_axis(axis_controller=axis_controller, position=position)
-        except Exception as e:
-            logger.warning(f'Movement of axis {axis} failed due to exception: {e}')
-        # Free up the controller
-        self.busy = False
+            # Get the axis controller depending on which axis is requested
+            if axis == 'x':
+                axis_controller = self.x_axis_controller
+            elif axis == 'y':
+                axis_controller = self.y_axis_controller
+            elif axis == 'z':
+                axis_controller = self.z_axis_controller
+            else:
+                raise ValueError(f'Requested axis {axis} is invalid.')
+
+            try:
+                self._set_axis(axis_controller=axis_controller, position=position)
+            except Exception as e:
+                logger.warning(f'Movement of axis {axis} failed due to exception: {e}')
+        finally:
+            self.busy = False
+            release_scanner()
 
     def _set_axis(self, axis_controller: NidaqPositionController, position: float):
         '''
@@ -119,36 +126,44 @@ class ScanController:
         # Block action if busy
         if self.busy:
             raise RuntimeError('Application controller is currently in use.')
-        # Block the controller from additional external commands
-        self.busy=True
-        # Start the counter
-        logger.info('Starting counter task on DAQ.')
-        self.counter_controller.start()
-        
-        # Get the axis controller depending on which axis is requested
-        if axis == 'x':
-            axis_controller = self.x_axis_controller
-        elif axis == 'y':
-            axis_controller = self.y_axis_controller
-        elif axis == 'z':
-            axis_controller = self.z_axis_controller
-        else:
-            raise ValueError(f'Requested axis {axis} is invalid.')
-        
-        # Go to start position
-        self._set_axis(axis_controller=axis_controller, position=start)
-        # Let the axis settle before next scan
-        time.sleep(self.inter_scan_settle_time)
-        
-        data = self._scan_axis(axis_controller=axis_controller,
-                               start=start,
-                               stop=stop,
-                               n_pixels=n_pixels,
-                               scan_time=scan_time)
-        
-        # Free up the controller
-        self.stop()
-        return data
+        if not acquire_scanner(blocking=True):
+            raise RuntimeError('Could not acquire piezo DAQ lock')
+        self.busy = True
+        try:
+            # Start the counter
+            logger.info('Starting counter task on DAQ.')
+            self.counter_controller.start()
+
+            # Get the axis controller depending on which axis is requested
+            if axis == 'x':
+                axis_controller = self.x_axis_controller
+            elif axis == 'y':
+                axis_controller = self.y_axis_controller
+            elif axis == 'z':
+                axis_controller = self.z_axis_controller
+            else:
+                raise ValueError(f'Requested axis {axis} is invalid.')
+
+            # Go to start position
+            self._set_axis(axis_controller=axis_controller, position=start)
+            # Let the axis settle before next scan
+            time.sleep(self.inter_scan_settle_time)
+
+            data = self._scan_axis(axis_controller=axis_controller,
+                                   start=start,
+                                   stop=stop,
+                                   n_pixels=n_pixels,
+                                   scan_time=scan_time)
+            self.stop()
+            return data
+        except BaseException:
+            if self.busy:
+                self.stop()
+            raise
+        finally:
+            if self.busy:
+                self.stop()
+            release_scanner()
 
     def _scan_axis(self, 
                    axis_controller: str,
@@ -221,71 +236,73 @@ class ScanController:
         # Block action if busy
         if self.busy:
             raise RuntimeError('Application controller is currently in use.')
-        # Reserve the controller
-        self.busy = True
-        
+        if not acquire_scanner(blocking=True):
+            raise RuntimeError('Could not acquire piezo DAQ lock')
+        try:
+            # Get the axis controller depending on which axis is requested
+            if axis_1 == 'x':
+                axis_controller_1 = self.x_axis_controller
+            elif axis_1 == 'y':
+                axis_controller_1 = self.y_axis_controller
+            elif axis_1 == 'z':
+                axis_controller_1 = self.z_axis_controller
+            else:
+                raise ValueError(f'Requested axis_1 {axis_1} is invalid.')
+            if axis_2 == 'x':
+                axis_controller_2 = self.x_axis_controller
+            elif axis_2 == 'y':
+                axis_controller_2 = self.y_axis_controller
+            elif axis_2 == 'z':
+                axis_controller_2 = self.z_axis_controller
+            else:
+                raise ValueError(f'Requested axis_2 {axis_2} is invalid.')
 
-        # Get the axis controller depending on which axis is requested
-        if axis_1 == 'x':
-            axis_controller_1 = self.x_axis_controller
-        elif axis_1 == 'y':
-            axis_controller_1 = self.y_axis_controller
-        elif axis_1 == 'z':
-            axis_controller_1 = self.z_axis_controller
-        else:
-            raise ValueError(f'Requested axis_1 {axis_1} is invalid.')
-        # Get the axis controller depending on which axis is requested
-        if axis_2 == 'x':
-            axis_controller_2 = self.x_axis_controller
-        elif axis_2 == 'y':
-            axis_controller_2 = self.y_axis_controller
-        elif axis_2 == 'z':
-            axis_controller_2 = self.z_axis_controller
-        else:
-            raise ValueError(f'Requested axis_2 {axis_2} is invalid.')
-        
-        # Start the counter
-        logger.info('Starting counter task on DAQ.')
-        self.counter_controller.start()
+            self.busy = True
+            logger.info('Starting counter task on DAQ.')
+            self.counter_controller.start()
 
-        # Get the positions for the slow scan axis
-        positions_2 = np.linspace(start=start_2, stop=stop_2, num=n_pixels_2)
+            positions_2 = np.linspace(start=start_2, stop=stop_2, num=n_pixels_2)
 
-        # Then iterate through the positions
-        for index, position in enumerate(positions_2):
-            # Move axis 2 to the desired position
-            self._set_axis(axis_controller=axis_controller_2, position=position)
-            # Let the axis settle before next scan
-            time.sleep(self.inter_scan_settle_time)
-            # Scan axis 1
-            single_scan =  self._scan_axis(axis_controller=axis_controller_1,
-                                           start=start_1,
-                                           stop=stop_1,
-                                           n_pixels=n_pixels_1, 
-                                           scan_time=scan_time)
-            # Update the buffer
-            #output[index] = single_scan
+            try:
+                for index, position in enumerate(positions_2):
+                    self._set_axis(axis_controller=axis_controller_2, position=position)
+                    time.sleep(self.inter_scan_settle_time)
+                    single_scan = self._scan_axis(
+                        axis_controller=axis_controller_1,
+                        start=start_1,
+                        stop=stop_1,
+                        n_pixels=n_pixels_1,
+                        scan_time=scan_time,
+                    )
+                    self._scan_axis(
+                        axis_controller=axis_controller_1,
+                        start=stop_1,
+                        stop=start_1,
+                        n_pixels=n_pixels_1,
+                        scan_time=self.inter_scan_settle_time,
+                    )
 
-            # Set back to original position on fast scan axis
-            #self._set_axis(axis_controller=axis_controller_1, position=start_1)
-            # Slow scan back to start for smooth scanning?
-            self._scan_axis(axis_controller=axis_controller_1,
-                            start=stop_1,
-                            stop=start_1,
-                            n_pixels=n_pixels_1, 
-                            scan_time=self.inter_scan_settle_time)
+                    yield single_scan
 
-            # Yield a single scan
-            yield single_scan
+                    if self.stop_scan:
+                        logger.info('Stopping scan.')
+                        self.stop()
+                        return
 
-            # If the stop is requested then terminate and return the final scan
-            if self.stop_scan:
-                logger.info('Stopping scan.')
+                logger.info('Scan complete.')
                 self.stop()
-                return single_scan
-            
-        logger.info('Scan complete.')
-        self.stop()
+            except GeneratorExit:
+                if self.busy:
+                    self.stop()
+                raise
+            except Exception:
+                if self.busy:
+                    self.stop()
+                raise
+        finally:
+            if self.busy:
+                self.stop()
+            release_scanner()
 
     def stop(self) -> None:
         '''

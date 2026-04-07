@@ -1,23 +1,6 @@
-QDLMOVE:
+QT3MOVE:
   Positioners:      # Add positioner configs defined in qt3utils.config_files.qt3_positioners_shared
     - Microstage
     - PiezoX
     - PiezoY
-    # - PiezoZ   # Enable in Positioners if Z piezo is wired
-
-  SignalAcquisition:
-    mode: analog   # 'analog' or 'counter'
-    analog:
-      device_name: Dev1
-      ai_channel: ai7   # Default analog input channel for signal
-      scale_factor: 1.0   # Multiply raw volts to get display units
-      units: "V"
-    counter:
-      device_name: Dev1
-      signal_terminal: PFI0    # NI DAQ terminal connected to TTL pulses
-      clock_terminal: ""       # Optional DI terminal for external clock; empty = use internal DI clock
-      clock_rate: 100000       # Hz, used if internal clock is configured
-      signal_counter: ctr0     # Counter channel used for counting pulses
-      samples_per_batch: 1000  # Number of samples per read for rate estimation
-      read_timeout: 5.0        # Seconds
-      units: "counts/s"
+    - PiezoZ   # Enable in Positioners if Z piezo is wired

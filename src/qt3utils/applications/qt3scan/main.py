@@ -1,6 +1,7 @@
 import importlib
 import importlib.resources
 import logging
+from typing import Tuple
 import numpy as np
 import datetime
 import h5py
@@ -19,7 +20,6 @@ from qt3utils.applications.qt3scan.application_gui import (
     LineScanApplicationView,
     ImageScanApplicationView
 )
-from qt3utils.applications.microstage_tk_panel import MicrostageTkPanel
 import qt3utils.applications.qt3scope.main as qt3scope
 
 logger = logging.getLogger(__name__)
@@ -54,8 +54,8 @@ class LauncherApplication:
     `ScanController` handles the actual movement of the piezos and coordinates it with
     the counters in order to perform basic confocal scanning measurements. The 
     application launches and instantiates a single `ScanController`, dubbed the 
-    "application controller", which it uses to perform scans. The application 
-    controller can be queried to move the piezos or perform specifc scans. Since it is
+    "application controller", which it uses to perform scans and scan-related piezo
+    motion. Since it is
     shared by all scans performed in the application session, it has built-in logic to
     ignore calls when it is busy, aided by threading. If one desires to perform 
     confocal scanning is appreciably different hardware, then the scan controller
@@ -64,7 +64,9 @@ class LauncherApplication:
 
     The `LauncherApplication` is the other main class. It instantiates the `ScanController`
     and creates a GUI (`LauncherApplicationView`) which allows the user to input scan
-    parameters and to launch image and line scans, as well as move the piezos directly.
+    parameters and to launch image and line scans. Manual piezo and microstage control
+    are done in qt3move; a cross-process lock prevents qt3move from moving piezos while
+    qt3scan holds the DAQ outputs for a scan.
 
     When an image or line scan is launched, the parameters are read out from the GUI and
     a new instance of the `ImageScanApplication` or `LineScanApplication` are created
@@ -113,11 +115,13 @@ class LauncherApplication:
         self.current_scan = None
         # Dictionary of scan parameters (from control gui)
         self.scan_parameters = None
-        # Dictionary of daq parameters (from control gui)
-        self.daq_parameters = None
 
         # Last save directory
         self.last_save_directory = None
+
+        self.signal_source = 'counter'
+        self._reader_counter = None
+        self._reader_photodiode = None
 
         # Load the YAML file
         self.load_yaml_from_name(yaml_filename=default_config_filename)
@@ -129,26 +133,21 @@ class LauncherApplication:
             self.root = tk.Toplevel()
         # Create the main application GUI
         self.view = LauncherApplicationView(main_window=self.root)
+        self._sync_signal_source_gui()
 
         # Bind the buttons
         self.view.control_panel.image_start_button.bind('<Button>', self.start_image_scan)
         self.view.control_panel.line_start_x_button.bind('<Button>', self.optimize_x_axis)
         self.view.control_panel.line_start_y_button.bind('<Button>', self.optimize_y_axis)
         self.view.control_panel.line_start_z_button.bind('<Button>', self.optimize_z_axis)
-        self.view.control_panel.x_axis_set_button.bind('<Button>', self.set_x_axis)
-        self.view.control_panel.y_axis_set_button.bind('<Button>', self.set_y_axis)
-        self.view.control_panel.z_axis_set_button.bind('<Button>', self.set_z_axis)
-        self.view.control_panel.get_position_button.bind('<Button>', self.get_coordinates)
         self.view.control_panel.open_counter_button.bind('<Button>', self.open_counter)
-        self.microstage_panel = MicrostageTkPanel(
-            self.view.control_panel.microstage_panel_container,
-            self.root,
-            self.microstage,
-        )
+        self.view.control_panel.counter_radio.config(
+            command=self._on_signal_source_selected)
+        self.view.control_panel.photodiode_radio.config(
+            command=self._on_signal_source_selected)
         self.root.protocol('WM_DELETE_WINDOW', self._on_launcher_closing)
 
     def _on_launcher_closing(self) -> None:
-        self.microstage_panel.destroy()
         self.root.destroy()
 
     def run(self) -> None:
@@ -186,6 +185,8 @@ class LauncherApplication:
 
         # First we get the top level application name
         APPLICATION_NAME = list(config.keys())[0]
+        # Microstage is controlled from qt3move only; do not open it in qt3scan.
+        config[APPLICATION_NAME].pop('Microstage', None)
 
         # Get the names of the counter and positioners
         hardware_dict = config[APPLICATION_NAME]['ApplicationController']['hardware']
@@ -202,6 +203,17 @@ class LauncherApplication:
         constructor = getattr(module, class_name)
         counter = constructor()
         counter.configure(config[APPLICATION_NAME][counter_name]['configure'])
+
+        photodiode_name = hardware_dict.get('photodiode')
+        photodiode = None
+        if photodiode_name:
+            import_path = config[APPLICATION_NAME][photodiode_name]['import_path']
+            class_name = config[APPLICATION_NAME][photodiode_name]['class_name']
+            module = importlib.import_module(import_path)
+            logger.debug(f"Importing {import_path}")
+            constructor = getattr(module, class_name)
+            photodiode = constructor()
+            photodiode.configure(config[APPLICATION_NAME][photodiode_name]['configure'])
 
         # Get the x axis instance
         import_path = config[APPLICATION_NAME][x_axis_name]['import_path']
@@ -248,36 +260,28 @@ class LauncherApplication:
         module = importlib.import_module(import_path)
         logger.debug(f"Importing {import_path}")
         constructor = getattr(module, class_name)
-        # Get the configure dictionary
-        controller_config_dict = config[APPLICATION_NAME]['ApplicationController']['configure']
-        # Create the application controller passing the hardware and the config dict
-        # as kwargs.
+        # Get the configure dictionary (do not pass signal_source into ScanController)
+        controller_config_dict = dict(
+            config[APPLICATION_NAME]['ApplicationController']['configure']
+        )
+        signal_source = controller_config_dict.pop('signal_source', 'counter')
+        if signal_source == 'photodiode' and photodiode is None:
+            logger.warning(
+                'signal_source is photodiode but Photodiode hardware is missing; using counter'
+            )
+            signal_source = 'counter'
+        self.signal_source = signal_source
+        self._reader_counter = counter
+        self._reader_photodiode = photodiode
+        active_reader = counter if signal_source == 'counter' else photodiode
+
         self.application_controller = constructor(
             **{'x_axis_controller': x_axis,
                'y_axis_controller': y_axis,
                'z_axis_controller': z_axis,
-               'counter_controller': counter,
+               'counter_controller': active_reader,
                **controller_config_dict}
         )
-
-        self._init_microstage_from_config(config, APPLICATION_NAME)
-
-    def _init_microstage_from_config(self, config, app_name: str) -> None:
-        self.microstage = None
-        block = config[app_name].get('Microstage')
-        if not block:
-            return
-        import_path = block.get('import_path')
-        class_name = block.get('class_name')
-        conf = block.get('configure', {})
-        if not import_path or not class_name:
-            return
-        try:
-            module = importlib.import_module(import_path)
-            ctor = getattr(module, class_name)
-            self.microstage = ctor(conf)
-        except Exception as e:
-            logger.warning('Microstage not initialized (scan piezos still work): %s', e)
 
     def load_yaml_from_name(self, yaml_filename: str) -> None:
         '''
@@ -293,6 +297,45 @@ class LauncherApplication:
         '''
         yaml_path = importlib.resources.files(CONFIG_PATH).joinpath(yaml_filename)
         self.configure_from_yaml(str(yaml_path))
+
+    @property
+    def intensity_ylabel(self) -> str:
+        return 'Intensity (V)' if self.signal_source == 'photodiode' else 'Intensity (cts/s)'
+
+    def image_norm_axis_labels(self) -> Tuple[str, str]:
+        if self.signal_source == 'photodiode':
+            return ('Minimum (V)', 'Maximum (V)')
+        return ('Minimum (cts/s)', 'Maximum (cts/s)')
+
+    def set_signal_source(self, source: str) -> None:
+        if source not in ('counter', 'photodiode'):
+            return
+        if self._reader_photodiode is None and source == 'photodiode':
+            logger.warning('Photodiode hardware not configured')
+            self._sync_signal_source_gui()
+            return
+        if self.application_controller is None:
+            return
+        if self.application_controller.busy:
+            logger.warning('Cannot switch signal source while scanning')
+            self._sync_signal_source_gui()
+            return
+        self.signal_source = source
+        self.application_controller.counter_controller = (
+            self._reader_photodiode if source == 'photodiode' else self._reader_counter
+        )
+
+    def _sync_signal_source_gui(self) -> None:
+        if not hasattr(self, 'view'):
+            return
+        panel = self.view.control_panel
+        if hasattr(panel, 'signal_source_var'):
+            panel.signal_source_var.set(self.signal_source)
+        if self._reader_photodiode is None and hasattr(panel, 'photodiode_radio'):
+            panel.photodiode_radio.config(state='disabled')
+
+    def _on_signal_source_selected(self) -> None:
+        self.set_signal_source(self.view.control_panel.signal_source_var.get())
 
     def enable_buttons(self) -> None:
         pass
@@ -435,82 +478,13 @@ class LauncherApplication:
             time = self.scan_parameters['image_time'],
             id = str(self.number_scans).zfill(3)
         )
-    
-    def set_x_axis(self, tkinter_event=None) -> None:
-        '''
-        Callback to set X button in launcher GUI.
-        Sets the axis position to what is entered in the GUI if valid.
-
-        Parameters
-        ----------
-        tkinter_event: tk.Event
-            The button press event, not used.
-        '''
-        try:
-            self._get_daq_config()
-            position = self.daq_parameters['x_position']
-            self.application_controller.set_axis(axis='x', position=position)
-            logger.info(f'Set x axis to {position}')
-        except Exception as e:
-            logger.error(f'Error with setting x axis: {e}')
-
-    def set_y_axis(self, tkinter_event=None) -> None:
-        '''
-        Callback to set Y button in launcher GUI.
-        Sets the axis position to what is entered in the GUI if valid.
-
-        Parameters
-        ----------
-        tkinter_event: tk.Event
-            The button press event, not used.
-        '''
-        try:
-            self._get_daq_config()
-            position = self.daq_parameters['y_position']
-            self.application_controller.set_axis(axis='y', position=position)
-            logger.info(f'Set y axis to {position}')
-        except Exception as e:
-            logger.error(f'Error with setting y axis: {e}')
-        
-    def set_z_axis(self, tkinter_event=None) -> None:
-        '''
-        Callback to set Z button in launcher GUI.
-        Sets the axis position to what is entered in the GUI if valid.
-
-        Parameters
-        ----------
-        tkinter_event: tk.Event
-            The button press event, not used.
-        '''
-        try:
-            self._get_daq_config()
-            position = self.daq_parameters['z_position']
-            self.application_controller.set_axis(axis='z', position=position)
-            logger.info(f'Set z axis to {position}')
-        except Exception as e:
-            logger.error(f'Error with setting z axis: {e}')
-        
-    def get_coordinates(self, tkinter_event=None) -> None:
-        '''
-        Callback to get position button in launcher GUI.
-        Populates the GUI DAQ position entries with the current position.
-
-        Parameters
-        ----------
-        tkinter_event: tk.Event
-            The button press event, not used.
-        '''    
-        x,y,z = self.application_controller.get_position()
-        self.view.control_panel.x_axis_set_entry.delete(0, 'end')
-        self.view.control_panel.y_axis_set_entry.delete(0, 'end')
-        self.view.control_panel.z_axis_set_entry.delete(0, 'end')
-        self.view.control_panel.x_axis_set_entry.insert(0, x)
-        self.view.control_panel.y_axis_set_entry.insert(0, y)
-        self.view.control_panel.z_axis_set_entry.insert(0, z)
 
     def open_counter(self, tkinter_event=None) -> None:
         try:
-            qt3scope.main(is_root_process=False)
+            qt3scope.main(
+                is_root_process=False,
+                signal_source=self.signal_source,
+            )
         except Exception as e:
             logger.warning(f'{e}')
 
@@ -581,29 +555,6 @@ class LauncherApplication:
             'line_time': line_time,
         }
 
-    def _get_daq_config(self) -> None:
-        '''
-        Gets the position parameters in the GUI and validates if they are allowable. 
-        Then saves the GUI input to the launcher application if valid.
-        '''
-        x_position = float(self.view.control_panel.x_axis_set_entry.get())
-        y_position = float(self.view.control_panel.y_axis_set_entry.get())
-        z_position = float(self.view.control_panel.z_axis_set_entry.get())
-
-        if (x_position < self.min_x_position) or (x_position > self.max_x_position):
-            raise ValueError(f'Requested x coordinate {x_position} is out of bounds.')
-        if (y_position < self.min_y_position) or (y_position > self.max_y_position):
-            raise ValueError(f'Requested y coordinate {y_position} is out of bounds.')
-        if (z_position < self.min_z_position) or (z_position > self.max_z_position):
-            raise ValueError(f'Requested z coordinate {z_position} is out of bounds.')
-
-        # Write to application memory
-        self.daq_parameters = {
-            'x_position': x_position,
-            'y_position': y_position,
-            'z_position': z_position
-        }
-
 
 class LineScanApplication:
     '''
@@ -627,8 +578,6 @@ class LineScanApplication:
         self.range = range
         self.n_pixels = n_pixels
         self.time = time
-        self.rclick_mpl_position_x = None
-        self.rclick_mpl_position_y = None
 
         # Time per pixel
         self.time_per_pixel = time / n_pixels
@@ -696,20 +645,21 @@ class LineScanApplication:
         # Setup the callback for rightclicks on the figure canvas
         self.view.data_viewport.canvas.mpl_connect('button_press_event', 
                                                    lambda event: self.open_rclick(event) if event.button == 3 else None)
-        # Set the commands for the right click
-        self.view.rclick_menu.add_command(label='Go to position', command=self.rclick_go_to) 
-        self.view.rclick_menu.add_separator() 
-        self.view.rclick_menu.add_command(label='Open counter', command=self.rclick_open_counter) 
+        self.view.rclick_menu.add_command(label='Open scope', command=self.rclick_open_counter)
 
         # Launch the thread
         self.scan_thread = Thread(target=self.scan_thread_function)
         self.scan_thread.start()
 
+    @property
+    def intensity_ylabel(self) -> str:
+        return self.parent_application.intensity_ylabel
+
     def scan_thread_function(self) -> None:
         try:
             logger.info('Starting scan thread.')
             logger.info(f'Starting scan on axis {self.axis}')
-            # Run the scan (returns raw counts)
+            # Run the scan (raw counts per pixel or mean V per pixel for photodiode)
             self.data_y = self.application_controller.scan_axis(
                 axis = self.axis,
                 start = self.min_position,
@@ -717,8 +667,9 @@ class LineScanApplication:
                 n_pixels = self.n_pixels,
                 scan_time = self.time
             )
-            # Normalize to counts per second
-            self.data_y = self.data_y / self.time_per_pixel
+            # Normalize to counts per second (counter only; photodiode stays mean V)
+            if self.parent_application.signal_source != 'photodiode':
+                self.data_y = self.data_y / self.time_per_pixel
             # Optimize the position
             self.update_position()
             # Update the viewport
@@ -751,35 +702,18 @@ class LineScanApplication:
         self.application_controller.set_axis(axis=self.axis, position=self.final_position_axis)
 
     def open_rclick(self, mpl_event : tk.Event = None):
-        # Get the right click position in the matplotlib axis
-        self.rclick_mpl_position_x = mpl_event.xdata
-        self.rclick_mpl_position_y = mpl_event.ydata
-        # Get the tkinter x,y coordinates of the mouse
         mouse_x, mouse_y = self.root.winfo_pointerxy()
-        # Open the popup menu with commands defined in the GUI file
-        try: 
-            self.view.rclick_menu.tk_popup(mouse_x,mouse_y) 
-        finally: 
+        try:
+            self.view.rclick_menu.tk_popup(mouse_x, mouse_y)
+        finally:
             self.view.rclick_menu.grab_release()
-        
-    def rclick_go_to(self):
-        # Make sure that the position of the right click is on the canvas
-        if self.rclick_mpl_position_x:
-            try:
-                # Go to the position on the voltage controller
-                self.application_controller.set_axis(axis=self.axis, position=self.rclick_mpl_position_x)
-                # Set the final position
-                self.final_position_axis = self.rclick_mpl_position_x
-                # Update the figure
-                self.view.update_figure()
-            except Exception as e:
-                logger.warning(f'Error in moving to position: {e}')
-        else:
-            logger.warning('Right click position out of axis.')
 
     def rclick_open_counter(self):
         try:
-            qt3scope.main(is_root_process=False)
+            qt3scope.main(
+                is_root_process=False,
+                signal_source=self.parent_application.signal_source,
+            )
         except Exception as e:
             logger.warning(f'{e}')
   
@@ -812,14 +746,15 @@ class LineScanApplication:
         sigma = 0.300 # 300 microns
         c = min_counts
 
+        lower_a = 1e-6 if self.parent_application.signal_source == 'photodiode' else 100
         try:
             p, _ = curve_fit(f=fit_function, 
                              xdata=self.data_x, 
                              ydata=self.data_y,
                              p0=[a, x0, sigma, c],
-                             bounds=[[100,self.min_position, 0.250, 0],
+                             bounds=[[lower_a,self.min_position, 0.250, 0],
                                      [np.inf, self.max_position, np.inf, np.inf]]) 
-                                    # ^ Increase the lower bound on a to prevent fitting to noise
+                                    # ^ Lower bound on a: counts vs voltage scale
             
             self.final_position_axis = p[1] # Set to x0
 
@@ -881,6 +816,7 @@ class LineScanApplication:
             ds.attrs['scan_id'] = self.id
             ds.attrs['timestamp'] = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
             ds.attrs['original_name'] = file_name
+            ds.attrs['signal_source'] = self.parent_application.signal_source
 
             # Save the scan settings
             # If your implementation settings vary you should change the attrs
@@ -920,14 +856,17 @@ class LineScanApplication:
             ds = df.create_dataset('data/positions', data=self.data_x)
             ds.attrs['units'] = 'Micrometers'
             ds.attrs['description'] = 'Positions of the scan (along axis).'
-            ds = df.create_dataset('data/count_rates', data=self.data_y)
-            ds.attrs['units'] = 'Counts per second'
-            ds.attrs['description'] = 'Count rates measured over scan.'
-            ds = df.create_dataset('data/counts', data=self.data_y*self.time_per_pixel)
-            ds.attrs['units'] = 'Counts'
-            ds.attrs['description'] = 'Counts measured over scan.'
-
-
+            if self.parent_application.signal_source == 'photodiode':
+                ds = df.create_dataset('data/mean_voltage', data=self.data_y)
+                ds.attrs['units'] = 'Volts'
+                ds.attrs['description'] = 'Mean photodiode voltage per pixel dwell.'
+            else:
+                ds = df.create_dataset('data/count_rates', data=self.data_y)
+                ds.attrs['units'] = 'Counts per second'
+                ds.attrs['description'] = 'Count rates measured over scan.'
+                ds = df.create_dataset('data/counts', data=self.data_y*self.time_per_pixel)
+                ds.attrs['units'] = 'Counts'
+                ds.attrs['description'] = 'Counts measured over scan.'
 
 
 class ImageScanApplication():
@@ -955,8 +894,6 @@ class ImageScanApplication():
         self.range = range
         self.n_pixels = n_pixels
         self.time = time
-        self.rclick_mpl_position_x = None
-        self.rclick_mpl_position_y = None
 
         # Time per pixel
         self.time_per_pixel = time / n_pixels
@@ -1044,9 +981,13 @@ class ImageScanApplication():
         # Then initialize the GUI
         self.root = tk.Toplevel()
         self.root.title(f'Scan {id} ({self.timestamp.strftime("%Y-%m-%d %H:%M:%S")})')
+        _img_settings = dict(parent_application.scan_parameters)
+        _nmin, _nmax = parent_application.image_norm_axis_labels()
+        _img_settings['image_norm_min_label'] = _nmin
+        _img_settings['image_norm_max_label'] = _nmax
         self.view = ImageScanApplicationView(window=self.root, 
                                             application=self,
-                                            settings_dict=parent_application.scan_parameters)
+                                            settings_dict=_img_settings)
         
         # Bind the buttons
         self.view.control_panel.pause_button.bind("<Button>", self.pause_scan)
@@ -1058,14 +999,15 @@ class ImageScanApplication():
         # Setup the callback for rightclicks on the figure canvas
         self.view.data_viewport.canvas.mpl_connect('button_press_event', 
                                                    lambda event: self.open_rclick(event) if event.button == 3 else None)
-        # Set the commands for the right click
-        self.view.rclick_menu.add_command(label='Go to position', command=self.rclick_go_to) 
-        self.view.rclick_menu.add_separator() 
-        self.view.rclick_menu.add_command(label='Open counter', command=self.rclick_open_counter) 
+        self.view.rclick_menu.add_command(label='Open scope', command=self.rclick_open_counter)
 
         # Launch the thread
         self.scan_thread = Thread(target=self.start_scan_thread_function)
         self.scan_thread.start()
+
+    @property
+    def intensity_ylabel(self) -> str:
+        return self.parent_application.intensity_ylabel
 
     def continue_scan(self, tkinter_event=None):
         # Don't do anything if busy
@@ -1144,6 +1086,7 @@ class ImageScanApplication():
                                                   'original_name'], dtype='S'))
             ds.attrs['application'] = 'qt3utils.qt3scan.ImageScanApplication'
             ds.attrs['qt3utils_version'] = qt3utils.__version__
+            ds.attrs['signal_source'] = self.parent_application.signal_source
             ds.attrs['scan_id'] = self.id
             ds.attrs['timestamp'] = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
             ds.attrs['original_name'] = file_name
@@ -1198,12 +1141,17 @@ class ImageScanApplication():
             ds = df.create_dataset('data/positions_axis_2', data=self.data_y)
             ds.attrs['units'] = 'Micrometers'
             ds.attrs['description'] = 'Positions of the scan (along axis 2).'
-            ds = df.create_dataset('data/count_rates', data=self.data_z)
-            ds.attrs['units'] = 'Counts per second'
-            ds.attrs['description'] = 'Count rates measured over 2-d scan.'
-            ds = df.create_dataset('data/counts', data=self.data_z*self.time_per_pixel)
-            ds.attrs['units'] = 'Counts'
-            ds.attrs['description'] = 'Counts measured over 2-d scan.'
+            if self.parent_application.signal_source == 'photodiode':
+                ds = df.create_dataset('data/mean_voltage', data=self.data_z)
+                ds.attrs['units'] = 'Volts'
+                ds.attrs['description'] = 'Mean photodiode voltage per pixel dwell.'
+            else:
+                ds = df.create_dataset('data/count_rates', data=self.data_z)
+                ds.attrs['units'] = 'Counts per second'
+                ds.attrs['description'] = 'Count rates measured over 2-d scan.'
+                ds = df.create_dataset('data/counts', data=self.data_z*self.time_per_pixel)
+                ds.attrs['units'] = 'Counts'
+                ds.attrs['description'] = 'Counts measured over 2-d scan.'
 
     def start_scan_thread_function(self):
         '''
@@ -1221,8 +1169,11 @@ class ImageScanApplication():
                             stop_2=self.max_position_2,
                             n_pixels_2=self.n_pixels,
                             scan_time=self.time):
-                # Set the data to the recently calculated line (in counts/second)
-                self.data_z[self.current_scan_index] = line / self.time_per_pixel
+                # Line data: counts/s (counter) or mean V (photodiode)
+                if self.parent_application.signal_source == 'photodiode':
+                    self.data_z[self.current_scan_index] = line
+                else:
+                    self.data_z[self.current_scan_index] = line / self.time_per_pixel
                 # Update the figure
                 self.view.update_figure()
                 # Increase the current scan index
@@ -1258,8 +1209,10 @@ class ImageScanApplication():
                             stop_2=self.max_position_2,
                             n_pixels_2=(self.n_pixels - self.current_scan_index), # Do the remaining pixels
                             scan_time=self.time):
-                # Set the data to the recently calculated line (in counts/second)
-                self.data_z[self.current_scan_index] = line / self.time_per_pixel
+                if self.parent_application.signal_source == 'photodiode':
+                    self.data_z[self.current_scan_index] = line
+                else:
+                    self.data_z[self.current_scan_index] = line / self.time_per_pixel
                 # Update the figure
                 self.view.update_figure()
                 # Increase the current scan index
@@ -1288,41 +1241,11 @@ class ImageScanApplication():
         self.application_controller.set_axis(axis=self.axis_2, position=self.start_position_axis_2)
 
     def open_rclick(self, mpl_event : tk.Event = None):
-        '''
-        This function is the callback for the matplotlib right click event on the figure
-        itself. It first gets and saves the x/y coordinate (in the data axes) and saves
-        it to the appliction. It then gets the Tkinter position of the mouse and uses
-        that to open a right click menu.
-        '''
-        # Get the right click position in the matplotlib axis
-        self.rclick_mpl_position_x = mpl_event.xdata
-        self.rclick_mpl_position_y = mpl_event.ydata
-        # Get the tkinter x,y coordinates of the mouse
         mouse_x, mouse_y = self.root.winfo_pointerxy()
-        # Open the popup menu with commands defined in the GUI file
-        try: 
-            self.view.rclick_menu.tk_popup(mouse_x,mouse_y) 
-        finally: 
+        try:
+            self.view.rclick_menu.tk_popup(mouse_x, mouse_y)
+        finally:
             self.view.rclick_menu.grab_release()
-        
-    def rclick_go_to(self):
-        '''
-        Method for the "go to" command in the right click menu. If a point within the 
-        figure axis has been clicked, then it attempts to move to that position.
-        '''
-        # Make sure that the position of the right click is on the canvas
-        if self.rclick_mpl_position_x and self.rclick_mpl_position_y:
-            try:
-                # Move to optmial position
-                self.application_controller.set_axis(axis=self.axis_1, position=self.rclick_mpl_position_x)
-                # Move to optmial position
-                self.application_controller.set_axis(axis=self.axis_2, position=self.rclick_mpl_position_y)
-                # Update the figure
-                self.view.update_figure()
-            except Exception as e:
-                logger.warning(f'Error in moving to position: {e}')
-        else:
-            logger.warning('Right click position out of axis.')
 
     def rclick_open_counter(self):
         '''
@@ -1330,7 +1253,10 @@ class ImageScanApplication():
         of `qt3scope`.
         '''
         try:
-            qt3scope.main(is_root_process=False)
+            qt3scope.main(
+                is_root_process=False,
+                signal_source=self.parent_application.signal_source,
+            )
         except Exception as e:
             logger.warning(f'{e}')
 
@@ -1366,11 +1292,6 @@ class ImageScanApplication():
 
 
 def main(is_root_process=True):
-    from qt3utils.applications.exclusive_stage_apps import (
-        exit_if_exclusive_lock_held_by_other,
-    )
-
-    exit_if_exclusive_lock_held_by_other('qt3scan')
     tkapp = LauncherApplication(
         default_config_filename=DEFAULT_CONFIG_FILE,
         is_root_process=is_root_process)

@@ -4,6 +4,9 @@ QT3SCOPE:
     class_name : ScopeController
     hardware :
       counter : Counter
+      photodiode : Photodiode
+    configure :
+      signal_source : counter
 
   Counter:
     import_path : qt3utils.hardware.nidaq.counters.nidaqtimedratecounter
@@ -16,3 +19,15 @@ QT3SCOPE:
       sample_time_in_seconds : 1    # Sampling time in seconds (updates later in scan)
       read_write_timeout : 10       # timeout in seconds for read/write operations
       signal_counter : ctr2         # NIDAQ counter to use for count
+
+  Photodiode:
+    import_path : qt3utils.hardware.nidaq.analoginputs.nidaqtimedanaloginput
+    class_name  : NidaqTimedAnalogMean
+    configure :
+      daq_name : Dev1
+      channel : ai1
+      clock_rate: 100000
+      sample_time_in_seconds : 1
+      read_write_timeout : 10
+      min_val : -10.0
+      max_val : 10.0

@@ -48,10 +48,7 @@ class ScopeApplicationView:
         self.data_viewport.ax.set_ylim(y_axis_limits)
 
         self.data_viewport.ax.set_xlabel(f'Sample index', fontsize=14)
-        if self.application.daq_parameters['get_rate']:
-            self.y_label = 'Intensity (cts/s)'
-        else:
-            self.y_label = 'Intensity (cts)'
+        self.y_label = self.application.scope_intensity_ylabel()
         self.data_viewport.ax.set_ylabel(self.y_label, fontsize=14)
         self.data_viewport.ax.grid(alpha=0.3)
 
@@ -72,6 +69,7 @@ class ScopeApplicationView:
         self.data_viewport.ax.set_xlim(0, self.application.max_samples_to_plot)
 
         self.data_viewport.ax.set_xlabel(f'Sample index', fontsize=14)
+        self.y_label = self.application.scope_intensity_ylabel()
         self.data_viewport.ax.set_ylabel(self.y_label, fontsize=14)
         self.data_viewport.ax.grid(alpha=0.3)
 
@@ -98,6 +96,26 @@ class ScopeControlPanel:
         tk.Label(control_frame,
                  text='Sampling parameters',
                  font='Helvetica 14').grid(row=row, column=0, pady=[0, 5], columnspan=2)
+        row += 1
+        tk.Label(control_frame, text='Signal', font='Helvetica 11').grid(
+            row=row, column=0, columnspan=2, sticky='w', padx=5, pady=(4, 0))
+        row += 1
+        self.signal_source_var = tk.StringVar(value='counter')
+        self.counter_radio = tk.Radiobutton(
+            control_frame,
+            text='Counter (PFI)',
+            variable=self.signal_source_var,
+            value='counter',
+        )
+        self.counter_radio.grid(row=row, column=0, columnspan=2, sticky='w', padx=5)
+        row += 1
+        self.photodiode_radio = tk.Radiobutton(
+            control_frame,
+            text='Photodiode (AI1)',
+            variable=self.signal_source_var,
+            value='photodiode',
+        )
+        self.photodiode_radio.grid(row=row, column=0, columnspan=2, sticky='w', padx=5)
         # Scan speed
         row += 1
         tk.Label(control_frame, text='Time per sample (s)').grid(row=row, column=0, padx=5, pady=2)

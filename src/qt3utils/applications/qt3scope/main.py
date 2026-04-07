@@ -1,6 +1,8 @@
 import importlib
 import importlib.resources
 import logging
+from typing import Optional
+
 import numpy as np
 import datetime
 import h5py
@@ -58,19 +60,30 @@ class ScopeApplication:
         `qt3scope.application_controller:read_counts_batches()`
     '''
 
-    def __init__(self, default_config_filename: str, is_root_process: bool) -> None:
+    def __init__(
+        self,
+        default_config_filename: str,
+        is_root_process: bool,
+        signal_source_override: Optional[str] = None,
+    ) -> None:
         '''
         Parameters
         ----------
         default_config_filename : str
             Name of the default YAML config file. The loader will look for this file in
             the default path `CONFIG_PATH` defined at the top of this module.
+        signal_source_override : str, optional
+            If set ('counter' or 'photodiode'), selects the active reader instead of YAML.
         '''
         # Boolean if the function is the root or not, determines if the application is
         # intialized via tk.Tk or tk.Toplevel
         self.is_root_process = is_root_process
+        self._signal_source_override = signal_source_override
 
         self.application_controller = None
+        self.signal_source = 'counter'
+        self._reader_counter = None
+        self._reader_photodiode = None
 
         # Data
         self.data_x = []
@@ -100,6 +113,12 @@ class ScopeApplication:
         # Create the main application GUI
         self.view = ScopeApplicationView(main_window=self.root, application=self)
 
+        self.view.control_panel.counter_radio.config(
+            command=self._on_signal_source_selected)
+        self.view.control_panel.photodiode_radio.config(
+            command=self._on_signal_source_selected)
+        self._sync_signal_source_gui()
+
         # Bind the buttons
         self.view.control_panel.start_button.bind("<Button>", self.start_continuous_sampling)
         self.view.control_panel.pause_button.bind("<Button>", self.stop_sampling)
@@ -121,12 +140,61 @@ class ScopeApplication:
         if self.is_root_process:
             self.root.mainloop()
 
+    def scope_intensity_ylabel(self) -> str:
+        if self.signal_source == 'photodiode':
+            return 'Mean voltage (V)'
+        if self.daq_parameters.get('get_rate', True):
+            return 'Intensity (cts/s)'
+        return 'Intensity (cts)'
+
+    def set_signal_source(self, source: str) -> None:
+        if source not in ('counter', 'photodiode'):
+            return
+        if self._reader_photodiode is None and source == 'photodiode':
+            logger.warning('Photodiode hardware not configured')
+            self._sync_signal_source_gui()
+            return
+        if self.application_controller is None:
+            return
+        if self.application_controller.running:
+            logger.warning('Cannot switch signal source while sampling')
+            self._sync_signal_source_gui()
+            return
+        self.signal_source = source
+        self.application_controller.counter_controller = (
+            self._reader_photodiode if source == 'photodiode' else self._reader_counter
+        )
+        if source == 'photodiode':
+            self.daq_parameters['get_rate'] = False
+        else:
+            self.daq_parameters['get_rate'] = True
+            self.view.control_panel.raw_counts_toggle.set(0)
+        self.apply_raw_counts_gui_state()
+
+    def _sync_signal_source_gui(self) -> None:
+        if not hasattr(self, 'view'):
+            return
+        self.view.control_panel.signal_source_var.set(self.signal_source)
+        if self._reader_photodiode is None:
+            self.view.control_panel.photodiode_radio.config(state='disabled')
+
+    def _on_signal_source_selected(self) -> None:
+        self.set_signal_source(self.view.control_panel.signal_source_var.get())
+
+    def apply_raw_counts_gui_state(self) -> None:
+        if not hasattr(self, 'view'):
+            return
+        if self.signal_source == 'photodiode':
+            self.view.control_panel.raw_counts_checkbutton.config(state='disabled')
+        else:
+            self.view.control_panel.raw_counts_checkbutton.config(state='normal')
+
     def enable_buttons(self) -> None:
         '''
         Sets the buttons into the default configuration after resetting the scanner.
         '''
         self.view.control_panel.sample_time_entry.config(state='normal')
-        self.view.control_panel.raw_counts_checkbutton.config(state='normal')
+        self.apply_raw_counts_gui_state()
         self.view.control_panel.start_button.config(state='normal')
         self.view.control_panel.pause_button.config(state='disabled')
         self.view.control_panel.reset_button.config(state='disabled')
@@ -232,6 +300,7 @@ class ScopeApplication:
         self.view.control_panel.pause_button.config(state='disabled')
         self.view.control_panel.reset_button.config(state='normal')
         self.view.control_panel.save_button.config(state='normal')
+        self.apply_raw_counts_gui_state()
 
     def reset_data(self, tkinter_event: tk.Event = None) -> None:
         '''
@@ -319,6 +388,7 @@ class ScopeApplication:
             ds.attrs['qt3utils_version'] = qt3utils.__version__
             ds.attrs['timestamp'] = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
             ds.attrs['original_name'] = file_name
+            ds.attrs['signal_source'] = self.signal_source
 
             # Save the scan settings
             ds = df.create_dataset('scan_settings/sample_time', data=self.daq_parameters['sample_time'])
@@ -332,11 +402,15 @@ class ScopeApplication:
             ds.attrs['units'] = 'seconds'
             ds.attrs['description'] = 'Timestamp of each sample relative to the start of the sampling.'
             ds = df.create_dataset('data/intensity', data=self.data_y)
-            if self.daq_parameters['get_rate']:
+            if self.signal_source == 'photodiode':
+                ds.attrs['units'] = 'volts'
+                ds.attrs['description'] = 'Mean photodiode voltage per sample window.'
+            elif self.daq_parameters['get_rate']:
                 ds.attrs['units'] = 'counts per second'
+                ds.attrs['description'] = 'Intensity of samples.'
             else:
                 ds.attrs['units'] = 'counts'
-            ds.attrs['description'] = 'Intensity of samples.'
+                ds.attrs['description'] = 'Intensity of samples.'
             ds = df.create_dataset('data/total_measurement_time', data=self.total_measurement_time)
             ds.attrs['units'] = 'seconds'
             ds.attrs['description'] = 'Total time in seconds that samples were taken (not including pauses).'
@@ -363,11 +437,9 @@ class ScopeApplication:
         # First we get the top level application name
         APPLICATION_NAME = list(config.keys())[0]
 
-        # Get the names of the counter and positioners
         hardware_dict = config[APPLICATION_NAME]['ApplicationController']['hardware']
         counter_name = hardware_dict['counter']
 
-        # Get the counter, instantiate, and configure
         import_path = config[APPLICATION_NAME][counter_name]['import_path']
         class_name = config[APPLICATION_NAME][counter_name]['class_name']
         module = importlib.import_module(import_path)
@@ -376,17 +448,44 @@ class ScopeApplication:
         counter = constructor()
         counter.configure(config[APPLICATION_NAME][counter_name]['configure'])
 
-        # Get the application controller constructor
+        photodiode_name = hardware_dict.get('photodiode')
+        photodiode = None
+        if photodiode_name:
+            import_path = config[APPLICATION_NAME][photodiode_name]['import_path']
+            class_name = config[APPLICATION_NAME][photodiode_name]['class_name']
+            module = importlib.import_module(import_path)
+            logger.debug(f"Importing {import_path}")
+            constructor = getattr(module, class_name)
+            photodiode = constructor()
+            photodiode.configure(config[APPLICATION_NAME][photodiode_name]['configure'])
+
+        ac_configure = config[APPLICATION_NAME]['ApplicationController'].get('configure') or {}
+        if self._signal_source_override is not None:
+            signal_source = self._signal_source_override
+        else:
+            signal_source = ac_configure.get('signal_source', 'counter')
+        if signal_source == 'photodiode' and photodiode is None:
+            logger.warning(
+                'signal_source is photodiode but Photodiode hardware is missing; using counter'
+            )
+            signal_source = 'counter'
+        self.signal_source = signal_source
+        self._reader_counter = counter
+        self._reader_photodiode = photodiode
+        active_reader = counter if signal_source == 'counter' else photodiode
+
         import_path = config[APPLICATION_NAME]['ApplicationController']['import_path']
         class_name = config[APPLICATION_NAME]['ApplicationController']['class_name']
         module = importlib.import_module(import_path)
         logger.debug(f"Importing {import_path}")
         constructor = getattr(module, class_name)
 
-        # Create the application controller passing the hardware as kwargs.
         self.application_controller = constructor(
-            **{'counter_controller': counter}
+            **{'counter_controller': active_reader}
         )
+
+        if self.signal_source == 'photodiode':
+            self.daq_parameters['get_rate'] = False
 
     def load_yaml_from_name(self, yaml_filename: str) -> None:
         '''
@@ -410,7 +509,10 @@ class ScopeApplication:
         '''
 
         sample_time = float(self.view.control_panel.sample_time_entry.get())
-        get_rate = not (bool(self.view.control_panel.raw_counts_toggle.get()))
+        if self.signal_source == 'photodiode':
+            get_rate = False
+        else:
+            get_rate = not (bool(self.view.control_panel.raw_counts_toggle.get()))
 
         # Check if the sample time is too long or too short
         if (sample_time < 0.001) or (sample_time > 60):
@@ -427,10 +529,12 @@ class ScopeApplication:
         }
 
 
-def main(is_root_process=True):
+def main(is_root_process=True, signal_source: Optional[str] = None):
     tkapp = ScopeApplication(
         default_config_filename=DEFAULT_CONFIG_FILE,
-        is_root_process=is_root_process)
+        is_root_process=is_root_process,
+        signal_source_override=signal_source,
+    )
     tkapp.run()
 
 

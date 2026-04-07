@@ -4,11 +4,14 @@ QT3SCAN:
     class_name : ScanController
     hardware :
       counter : Counter
+      photodiode : Photodiode
       x_axis_control : PiezoX
       y_axis_control : PiezoY
       z_axis_control : PiezoZ
     configure :
       inter_scan_settle_time : 0.01
+      # counter | photodiode — photodiode uses AI1; ensure no conflict with piezo readback on that channel
+      signal_source : counter
 
   Counter:
     import_path : qt3utils.hardware.nidaq.counters.nidaqtimedratecounter
@@ -21,3 +24,15 @@ QT3SCAN:
       sample_time_in_seconds : 1
       read_write_timeout : 10
       signal_counter : ctr2
+
+  Photodiode:
+    import_path : qt3utils.hardware.nidaq.analoginputs.nidaqtimedanaloginput
+    class_name  : NidaqTimedAnalogMean
+    configure :
+      daq_name : Dev1
+      channel : ai1
+      clock_rate: 100000
+      sample_time_in_seconds : 1
+      read_write_timeout : 10
+      min_val : -10.0
+      max_val : 10.0

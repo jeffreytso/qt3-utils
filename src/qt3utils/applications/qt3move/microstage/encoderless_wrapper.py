@@ -96,7 +96,7 @@ class EncoderlessMicrostage:
 
         # Virtually set this physical location as our (0, 0) origin
         self.set_position(0, 0)
-        print("✅ Homing successful. Bottom-right corner is now defined as (0, 0).")
+        print("Homing successful. Bottom-right corner is now defined as (0, 0).")
 
     def return_to_home(self):
         """Moves the stage back to the defined (0, 0) origin."""

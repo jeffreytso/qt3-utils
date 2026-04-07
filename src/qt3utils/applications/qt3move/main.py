@@ -568,44 +568,73 @@ class Qt3MoveApp(tk.Tk):
             self.microstage_status_label.config(foreground="red")
             messagebox.showerror("Movement Error", f"An error occurred: {e}")
 
+    def _run_piezo_manual(self, action) -> None:
+        from qt3utils.applications.piezo_daq_lock import (
+            release_manual_move,
+            try_acquire_manual_move,
+        )
+
+        if not try_acquire_manual_move():
+            messagebox.showwarning(
+                "Piezo busy",
+                "qt3scan is using the piezo outputs. Wait for the scan to finish, then try again.",
+            )
+            return
+        try:
+            action()
+        finally:
+            release_manual_move()
+
     def _set_piezo_x_position(self):
         """Set piezo X position"""
         if not self.piezo_x:
             return
-        try:
-            target_x = float(self.piezo_x_set_var.get())
-            self.piezo_x.go_to_position(target_x)
-            self.piezo_x_current_var.set(f"{self.piezo_x.get_current_position():.3f}")
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Please enter a valid number for the Piezo X position.")
-        except Exception as e:
-            messagebox.showerror("Piezo X Error", f"An error occurred: {e}")
+
+        def do_move():
+            try:
+                target_x = float(self.piezo_x_set_var.get())
+                self.piezo_x.go_to_position(target_x)
+                self.piezo_x_current_var.set(f"{self.piezo_x.get_current_position():.3f}")
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Please enter a valid number for the Piezo X position.")
+            except Exception as e:
+                messagebox.showerror("Piezo X Error", f"An error occurred: {e}")
+
+        self._run_piezo_manual(do_move)
 
     def _set_piezo_y_position(self):
         """Set piezo Y position"""
         if not self.piezo_y:
             return
-        try:
-            target_y = float(self.piezo_y_set_var.get())
-            self.piezo_y.go_to_position(target_y)
-            self.piezo_y_current_var.set(f"{self.piezo_y.get_current_position():.3f}")
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Please enter a valid number for the Piezo Y position.")
-        except Exception as e:
-            messagebox.showerror("Piezo Y Error", f"An error occurred: {e}")
+
+        def do_move():
+            try:
+                target_y = float(self.piezo_y_set_var.get())
+                self.piezo_y.go_to_position(target_y)
+                self.piezo_y_current_var.set(f"{self.piezo_y.get_current_position():.3f}")
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Please enter a valid number for the Piezo Y position.")
+            except Exception as e:
+                messagebox.showerror("Piezo Y Error", f"An error occurred: {e}")
+
+        self._run_piezo_manual(do_move)
 
     def _set_piezo_z_position(self):
         """Set piezo Z position"""
         if not self.piezo_z:
             return
-        try:
-            target_z = float(self.piezo_z_set_var.get())
-            self.piezo_z.go_to_position(target_z)
-            self.piezo_z_current_var.set(f"{self.piezo_z.get_current_position():.3f}")
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Please enter a valid number for the Piezo Z position.")
-        except Exception as e:
-            messagebox.showerror("Piezo Z Error", f"An error occurred: {e}")
+
+        def do_move():
+            try:
+                target_z = float(self.piezo_z_set_var.get())
+                self.piezo_z.go_to_position(target_z)
+                self.piezo_z_current_var.set(f"{self.piezo_z.get_current_position():.3f}")
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Please enter a valid number for the Piezo Z position.")
+            except Exception as e:
+                messagebox.showerror("Piezo Z Error", f"An error occurred: {e}")
+
+        self._run_piezo_manual(do_move)
 
     def _handle_key_press(self, event):
         # Failsafe in case bindings are somehow active when they shouldn't be
@@ -955,49 +984,65 @@ class Qt3MoveApp(tk.Tk):
         """Step piezo X left"""
         if not self.piezo_x:
             return
-        try:
-            step = float(self.piezo_x_step_var.get())
-            current_pos = self.piezo_x.get_current_position()
-            new_x = current_pos - step
-            self.piezo_x.go_to_position(new_x)
-        except ValueError:
-            pass
-    
+
+        def do_move():
+            try:
+                step = float(self.piezo_x_step_var.get())
+                current_pos = self.piezo_x.get_current_position()
+                new_x = current_pos - step
+                self.piezo_x.go_to_position(new_x)
+            except ValueError:
+                pass
+
+        self._run_piezo_manual(do_move)
+
     def _step_piezo_right(self, event):
         """Step piezo X right"""
         if not self.piezo_x:
             return
-        try:
-            step = float(self.piezo_x_step_var.get())
-            current_pos = self.piezo_x.get_current_position()
-            new_x = current_pos + step
-            self.piezo_x.go_to_position(new_x)
-        except ValueError:
-            pass
-    
+
+        def do_move():
+            try:
+                step = float(self.piezo_x_step_var.get())
+                current_pos = self.piezo_x.get_current_position()
+                new_x = current_pos + step
+                self.piezo_x.go_to_position(new_x)
+            except ValueError:
+                pass
+
+        self._run_piezo_manual(do_move)
+
     def _step_piezo_up(self, event):
         """Step piezo Y up"""
         if not self.piezo_y:
             return
-        try:
-            step = float(self.piezo_y_step_var.get())
-            current_pos = self.piezo_y.get_current_position()
-            new_y = current_pos + step
-            self.piezo_y.go_to_position(new_y)
-        except ValueError:
-            pass
-    
+
+        def do_move():
+            try:
+                step = float(self.piezo_y_step_var.get())
+                current_pos = self.piezo_y.get_current_position()
+                new_y = current_pos + step
+                self.piezo_y.go_to_position(new_y)
+            except ValueError:
+                pass
+
+        self._run_piezo_manual(do_move)
+
     def _step_piezo_down(self, event):
         """Step piezo Y down"""
         if not self.piezo_y:
             return
-        try:
-            step = float(self.piezo_y_step_var.get())
-            current_pos = self.piezo_y.get_current_position()
-            new_y = current_pos - step
-            self.piezo_y.go_to_position(new_y)
-        except ValueError:
-            pass
+
+        def do_move():
+            try:
+                step = float(self.piezo_y_step_var.get())
+                current_pos = self.piezo_y.get_current_position()
+                new_y = current_pos - step
+                self.piezo_y.go_to_position(new_y)
+            except ValueError:
+                pass
+
+        self._run_piezo_manual(do_move)
 
     def _on_closing(self):
         print("Closing application and releasing resources...")
@@ -1007,10 +1052,5 @@ class Qt3MoveApp(tk.Tk):
         self.destroy()
 
 if __name__ == "__main__":
-    from qt3utils.applications.exclusive_stage_apps import (
-        exit_if_exclusive_lock_held_by_other,
-    )
-
-    exit_if_exclusive_lock_held_by_other('qt3move')
     app = Qt3MoveApp(config_file=CONFIG_FILE)
     app.mainloop()

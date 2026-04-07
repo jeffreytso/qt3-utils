@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from qt3utils.hardware.nidaq.counters.nidaqtimedratecounter import NidaqTimedRateCounter
+from qt3utils.hardware.nidaq.timed_batch_signal_reader import TimedBatchSignalReader
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -15,7 +15,7 @@ class ScopeController:
     '''
 
     def __init__(self,
-                 counter_controller: NidaqTimedRateCounter):
+                 counter_controller: TimedBatchSignalReader):
 
         self.counter_controller = counter_controller
 

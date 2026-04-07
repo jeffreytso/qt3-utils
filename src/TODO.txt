@@ -9,9 +9,10 @@
 3. For transmission: Heat map, y axis is wavelength and color bar is voltage
     Add warning for users if points exceed capacity
 
-4. Create qt3home with: qt3move, qt3scan, qt3santec, qt3power,
-    and qt3scope (same as qdlutils except instead of only one detector we have the 3 options)
+4. qt3chromatune is unused, but document its existence in case need for future.
 
-5. qt3chromatune is unused, but document its existence in case need for future.
+5. When new piezo arrives test again
 
-6. When new piezo arrives test again
+6. Automate flip mirrors
+
+7. Fix MON cable values for Piezo
