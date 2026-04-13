@@ -36,8 +36,8 @@ def main() -> None:
     root = tk.Tk()
     root.title("QT3 Home")
     root.resizable(False, False)
-    root.minsize(254, 308)
-    root.geometry("254x308")
+    root.minsize(254, 360)
+    root.geometry("254x360")
 
     root.grid_columnconfigure(0, weight=1)
     root.grid_rowconfigure(0, weight=1)
@@ -54,6 +54,7 @@ def main() -> None:
         ("Qt3 Santec", "qt3utils.applications.qt3santec.main", None),
         ("Qt3 Scan", "qt3utils.applications.qt3scan.main", None),
         ("Qt3 Scope", "qt3utils.applications.qt3scope.main", None),
+        ("Qt3 Mirror", "qt3utils.applications.qt3mirror.main", None),
     ]
 
     for i, (label, mod, cwd) in enumerate(apps):
