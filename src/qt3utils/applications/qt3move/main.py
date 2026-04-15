@@ -3,7 +3,6 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 import yaml
-import os
 
 from qt3utils.config_loader import merge_shared_positioners_into_app_config
 
@@ -119,9 +118,6 @@ class Qt3MoveApp(tk.Tk):
         
         # Stepping control variables
         self.stepping_controller_var = tk.StringVar(value="None")
-        self.piezo_x_step_var = tk.StringVar(value="1")
-        self.piezo_y_step_var = tk.StringVar(value="1")
-        self.piezo_z_step_var = tk.StringVar(value="1")
         
         # Piezo variables
         self.piezo_x_set_var = tk.StringVar(value="0.0")
@@ -202,12 +198,40 @@ class Qt3MoveApp(tk.Tk):
         
         return piezo_configs
 
+    def _piezo_axis_values_for_ui(self):
+        """Piezo axes present in hardware (for stepping axis combobox)."""
+        vals = []
+        if self.piezo_x:
+            vals.append("X")
+        if self.piezo_y:
+            vals.append("Y")
+        if self.piezo_z:
+            vals.append("Z")
+        return vals
+
+    def _sync_step_axis_for_controller(self):
+        """Keep axis combobox values and selection valid when switching Microstage / Piezo."""
+        c = self.stepping_controller_var.get()
+        if c not in ("Microstage", "Piezo"):
+            return
+        cur = self.step_axis_var.get()
+        if c == "Microstage":
+            vals = ["X", "Y"]
+            self._microstage_axis_combo.configure(values=vals)
+            if cur not in vals:
+                self.step_axis_var.set("X")
+        else:
+            vals = self._piezo_axis_values_for_ui()
+            self._piezo_axis_combo.configure(values=vals if vals else ["X"])
+            if vals and cur not in vals:
+                self.step_axis_var.set(vals[0])
+
     def _initialize_piezo_displays(self):
         """Initialize piezo position displays; show --- until user sets a position."""
         if self.piezo_x:
             try:
-                if getattr(self.piezo_x, 'has_last_position', lambda: False)():
-                    pos = self.piezo_x.get_current_position()
+                pos = self.piezo_x.get_last_commanded_position()
+                if pos is not None:
                     self.piezo_x_set_var.set(f"{pos:.3f}")
                     self.piezo_x_current_var.set(f"{pos:.3f}")
                 else:
@@ -217,8 +241,8 @@ class Qt3MoveApp(tk.Tk):
         
         if self.piezo_y:
             try:
-                if getattr(self.piezo_y, 'has_last_position', lambda: False)():
-                    pos = self.piezo_y.get_current_position()
+                pos = self.piezo_y.get_last_commanded_position()
+                if pos is not None:
                     self.piezo_y_set_var.set(f"{pos:.3f}")
                     self.piezo_y_current_var.set(f"{pos:.3f}")
                 else:
@@ -228,8 +252,8 @@ class Qt3MoveApp(tk.Tk):
         
         if self.piezo_z:
             try:
-                if getattr(self.piezo_z, 'has_last_position', lambda: False)():
-                    pos = self.piezo_z.get_current_position()
+                pos = self.piezo_z.get_last_commanded_position()
+                if pos is not None:
                     self.piezo_z_set_var.set(f"{pos:.3f}")
                     self.piezo_z_current_var.set(f"{pos:.3f}")
                 else:
@@ -287,7 +311,7 @@ class Qt3MoveApp(tk.Tk):
         stepping_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
         
         # Stepping controller selection
-        ttk.Label(stepping_frame, text="Enable arrow key stepping for:").grid(row=0, column=0, sticky="w", padx=5, pady=(0, 5))
+        ttk.Label(stepping_frame, text="Enable keyboard stepping for:").grid(row=0, column=0, sticky="w", padx=5, pady=(0, 5))
         stepping_controller_combo = ttk.Combobox(
             stepping_frame, 
             textvariable=self.stepping_controller_var,
@@ -303,33 +327,63 @@ class Qt3MoveApp(tk.Tk):
         self.microstage_stepping_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         
         ttk.Label(self.microstage_stepping_frame, text="Step (µm):").grid(row=0, column=0, sticky="w", padx=5)
-        ttk.Entry(self.microstage_stepping_frame, textvariable=self.step_var, width=10).grid(row=0, column=1, padx=5)
+        microstage_step_entry = ttk.Entry(self.microstage_stepping_frame, textvariable=self.step_var, width=10)
+        microstage_step_entry.grid(row=0, column=1, padx=5)
+        _ms_tip = ("Arrow keys: Left / Right (X), Up / Down (Y).")
+        ToolTip(microstage_step_entry, _ms_tip)
         
         ttk.Label(self.microstage_stepping_frame, text="Axis:").grid(row=0, column=2, sticky="w", padx=(10, 5))
-        step_axis_combo = ttk.Combobox(
+        self._microstage_axis_combo = ttk.Combobox(
             self.microstage_stepping_frame,
             textvariable=self.step_axis_var,
-            values=["X", "-X", "Y", "-Y"],
+            values=["X", "Y"],
             state="readonly",
-            width=5
+            width=5,
         )
-        step_axis_combo.grid(row=0, column=3, padx=5)
+        self._microstage_axis_combo.grid(row=0, column=3, padx=5)
         
-        step_button = ttk.Button(self.microstage_stepping_frame, text="Step", command=self._step_microstage_button)
-        step_button.grid(row=0, column=4, padx=(10, 5))
-        ToolTip(step_button, "Step: Moves the microstage by the specified step value in the selected direction. You can also use arrow keys to step when stepping is enabled.")
+        ttk.Button(
+            self.microstage_stepping_frame,
+            text="Step +",
+            command=lambda: self._step_microstage_delta(1),
+        ).grid(row=0, column=4, padx=(10, 3))
+        ttk.Button(
+            self.microstage_stepping_frame,
+            text="Step −",
+            command=lambda: self._step_microstage_delta(-1),
+        ).grid(row=0, column=5, padx=(3, 5))
         
-        # Piezo stepping controls
+        # Piezo stepping controls (same layout as microstage; one step value for all axes)
         self.piezo_stepping_frame = ttk.Frame(stepping_frame)
         self.piezo_stepping_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        _piezo_axes = self._piezo_axis_values_for_ui()
+        ttk.Label(self.piezo_stepping_frame, text="Step (µm):").grid(row=0, column=0, sticky="w", padx=5)
+        piezo_step_entry = ttk.Entry(self.piezo_stepping_frame, textvariable=self.step_var, width=10)
+        piezo_step_entry.grid(row=0, column=1, padx=5)
+        _axis_list = ", ".join(_piezo_axes) if _piezo_axes else "X"
+        _pz_tip = (f"Arrow keys: Left / Right (X), Up / Down (Y){', Page Up / Page Down (Z)' if self.piezo_z else '.'}")
+        ToolTip(piezo_step_entry, _pz_tip)
         
-        ttk.Label(self.piezo_stepping_frame, text="Piezo X Step (µm):").grid(row=0, column=0, sticky="w", padx=5)
-        ttk.Entry(self.piezo_stepping_frame, textvariable=self.piezo_x_step_var, width=10).grid(row=0, column=1, padx=5)
-        ttk.Label(self.piezo_stepping_frame, text="Piezo Y Step (µm):").grid(row=1, column=0, sticky="w", padx=5, pady=(5,0))
-        ttk.Entry(self.piezo_stepping_frame, textvariable=self.piezo_y_step_var, width=10).grid(row=1, column=1, padx=5, pady=(5,0))
-        # Piezo Z temporarily disabled
-        # ttk.Label(self.piezo_stepping_frame, text="Piezo Z Step (µm):").grid(row=2, column=0, sticky="w", padx=5, pady=(5,0))
-        # ttk.Entry(self.piezo_stepping_frame, textvariable=self.piezo_z_step_var, width=10).grid(row=2, column=1, padx=5, pady=(5,0))
+        ttk.Label(self.piezo_stepping_frame, text="Axis:").grid(row=0, column=2, sticky="w", padx=(10, 5))
+        self._piezo_axis_combo = ttk.Combobox(
+            self.piezo_stepping_frame,
+            textvariable=self.step_axis_var,
+            values=_piezo_axes if _piezo_axes else ["X"],
+            state="readonly",
+            width=5,
+        )
+        self._piezo_axis_combo.grid(row=0, column=3, padx=5)
+        
+        ttk.Button(
+            self.piezo_stepping_frame,
+            text="Step +",
+            command=lambda: self._step_piezo_delta(1),
+        ).grid(row=0, column=4, padx=(10, 3))
+        ttk.Button(
+            self.piezo_stepping_frame,
+            text="Step −",
+            command=lambda: self._step_piezo_delta(-1),
+        ).grid(row=0, column=5, padx=(3, 5))
         
         # Initially hide both stepping frames
         self._update_stepping_controls_visibility()
@@ -594,7 +648,7 @@ class Qt3MoveApp(tk.Tk):
             try:
                 target_x = float(self.piezo_x_set_var.get())
                 self.piezo_x.go_to_position(target_x)
-                self.piezo_x_current_var.set(f"{self.piezo_x.get_current_position():.3f}")
+                self.piezo_x_current_var.set(f"{target_x:.3f}")
             except ValueError:
                 messagebox.showerror("Invalid Input", "Please enter a valid number for the Piezo X position.")
             except Exception as e:
@@ -611,7 +665,7 @@ class Qt3MoveApp(tk.Tk):
             try:
                 target_y = float(self.piezo_y_set_var.get())
                 self.piezo_y.go_to_position(target_y)
-                self.piezo_y_current_var.set(f"{self.piezo_y.get_current_position():.3f}")
+                self.piezo_y_current_var.set(f"{target_y:.3f}")
             except ValueError:
                 messagebox.showerror("Invalid Input", "Please enter a valid number for the Piezo Y position.")
             except Exception as e:
@@ -628,7 +682,7 @@ class Qt3MoveApp(tk.Tk):
             try:
                 target_z = float(self.piezo_z_set_var.get())
                 self.piezo_z.go_to_position(target_z)
-                self.piezo_z_current_var.set(f"{self.piezo_z.get_current_position():.3f}")
+                self.piezo_z_current_var.set(f"{target_z:.3f}")
             except ValueError:
                 messagebox.showerror("Invalid Input", "Please enter a valid number for the Piezo Z position.")
             except Exception as e:
@@ -686,32 +740,25 @@ class Qt3MoveApp(tk.Tk):
             self.microstage_status_label.config(foreground="red")
             messagebox.showerror("Movement Error", f"An error occurred: {e}")
     
-    def _step_microstage_button(self):
-        """Step microstage using the Step button"""
-        if not self.stage:
+    def _step_microstage_delta(self, direction_sign):
+        """Step microstage by step_var along selected axis; direction_sign is +1 or -1."""
+        if not self.stage or direction_sign not in (-1, 1):
             return
-        
-        # Show one-time warning if not homed
         self._show_stepping_warning()
-        
+
         try:
             self.microstage_status_var.set("MOVING...")
             self.microstage_status_label.config(foreground="orange")
             self.update_idletasks()
-            
-            step_val = abs(float(self.step_var.get()))  # Only allow positive values
-            axis = self.step_axis_var.get()  # "X", "-X", "Y", or "-Y"
+
+            step_mag = abs(float(self.step_var.get()))
+            step_val = step_mag * direction_sign
+            axis = self.step_axis_var.get()
             current_pos = self.stage.get_position()
-            
-            # Run movement in background thread
+
             def move_step():
                 if axis == "X":
                     new_x = current_pos[0] + step_val
-                    if self.is_homed:
-                        new_x = max(self.stage.x_min, min(self.stage.x_max, new_x))
-                    self.stage.move_to(new_x, current_pos[1])
-                elif axis == "-X":
-                    new_x = current_pos[0] - step_val
                     if self.is_homed:
                         new_x = max(self.stage.x_min, min(self.stage.x_max, new_x))
                     self.stage.move_to(new_x, current_pos[1])
@@ -720,20 +767,36 @@ class Qt3MoveApp(tk.Tk):
                     if self.is_homed:
                         new_y = max(self.stage.y_min, min(self.stage.y_max, new_y))
                     self.stage.move_to(current_pos[0], new_y)
-                elif axis == "-Y":
-                    new_y = current_pos[1] - step_val
-                    if self.is_homed:
-                        new_y = max(self.stage.y_min, min(self.stage.y_max, new_y))
-                    self.stage.move_to(current_pos[0], new_y)
-            
+
             self._run_movement_in_thread(move_step)
-            
+
         except ValueError:
             messagebox.showerror("Invalid Input", "Please enter a valid positive number for the Step value.")
         except Exception as e:
             self.microstage_status_var.set("Error")
             self.microstage_status_label.config(foreground="red")
             messagebox.showerror("Movement Error", f"An error occurred: {e}")
+
+    def _step_piezo_delta(self, direction_sign):
+        """Step selected piezo axis by step_var; direction_sign is +1 (Step +) or -1 (Step −)."""
+        if direction_sign not in (-1, 1):
+            return
+
+        axis = self.step_axis_var.get()
+        piezo = {"X": self.piezo_x, "Y": self.piezo_y, "Z": self.piezo_z}.get(axis)
+        if not piezo:
+            return
+
+        try:
+            step = abs(float(self.step_var.get())) * direction_sign
+        except ValueError:
+            messagebox.showerror("Invalid Input", "Please enter a valid number for the Step value.")
+            return
+
+        def do_move():
+            self._piezo_arrow_step_delta(piezo, step)
+
+        self._run_piezo_manual(do_move)
 
     def _update_position_display(self):
         # Update microstage display if homed
@@ -800,11 +863,12 @@ class Qt3MoveApp(tk.Tk):
                 self.microstage_status_label.config(foreground="red")
                 print(f"Error checking microstage movement status: {e}")
         
-        # Update piezo displays (--- until user has set a position)
+        # Update piezo "Previous Value" from last commanded position (not MON readback)
         if self.piezo_x:
             try:
-                if getattr(self.piezo_x, 'has_last_position', lambda: False)():
-                    self.piezo_x_current_var.set(f"{self.piezo_x.get_current_position():.3f}")
+                pos = self.piezo_x.get_last_commanded_position()
+                if pos is not None:
+                    self.piezo_x_current_var.set(f"{pos:.3f}")
                 else:
                     self.piezo_x_current_var.set("---")
             except Exception as e:
@@ -813,8 +877,9 @@ class Qt3MoveApp(tk.Tk):
         
         if self.piezo_y:
             try:
-                if getattr(self.piezo_y, 'has_last_position', lambda: False)():
-                    self.piezo_y_current_var.set(f"{self.piezo_y.get_current_position():.3f}")
+                pos = self.piezo_y.get_last_commanded_position()
+                if pos is not None:
+                    self.piezo_y_current_var.set(f"{pos:.3f}")
                 else:
                     self.piezo_y_current_var.set("---")
             except Exception as e:
@@ -823,8 +888,9 @@ class Qt3MoveApp(tk.Tk):
         
         if self.piezo_z:
             try:
-                if getattr(self.piezo_z, 'has_last_position', lambda: False)():
-                    self.piezo_z_current_var.set(f"{self.piezo_z.get_current_position():.3f}")
+                pos = self.piezo_z.get_last_commanded_position()
+                if pos is not None:
+                    self.piezo_z_current_var.set(f"{pos:.3f}")
                 else:
                     self.piezo_z_current_var.set("---")
             except Exception as e:
@@ -836,6 +902,7 @@ class Qt3MoveApp(tk.Tk):
     def _on_stepping_controller_changed(self, event=None):
         """Handle stepping controller selection change"""
         self._update_stepping_controls_visibility()
+        self._sync_step_axis_for_controller()
         self._update_key_bindings()
     
     def _update_stepping_controls_visibility(self):
@@ -859,6 +926,8 @@ class Qt3MoveApp(tk.Tk):
         self.unbind_all("<KeyPress-Right>")
         self.unbind_all("<KeyPress-Up>")
         self.unbind_all("<KeyPress-Down>")
+        self.unbind_all("<KeyPress-Prior>")
+        self.unbind_all("<KeyPress-Next>")
         
         controller = self.stepping_controller_var.get()
         if controller == "Microstage":
@@ -872,7 +941,13 @@ class Qt3MoveApp(tk.Tk):
             self.bind_all("<KeyPress-Right>", self._step_piezo_right)
             self.bind_all("<KeyPress-Up>", self._step_piezo_up)
             self.bind_all("<KeyPress-Down>", self._step_piezo_down)
-            print("Piezo stepping enabled - Use arrow keys to move piezo")
+            if self.piezo_z:
+                self.bind_all("<KeyPress-Prior>", self._step_piezo_page_up)
+                self.bind_all("<KeyPress-Next>", self._step_piezo_page_down)
+            print(
+                "Piezo stepping enabled - Arrow keys: X/Y"
+                + ("; Page Up/Down: Z" if self.piezo_z else "")
+            )
         else:
             print("Stepping disabled")
     
@@ -979,7 +1054,21 @@ class Qt3MoveApp(tk.Tk):
             self._run_movement_in_thread(move_down)
         except ValueError:
             pass
-    
+
+    def _piezo_arrow_step_delta(self, piezo, signed_dx):
+        """Step by signed_dx µm using commanded chain (NidaqPositionController.step_position).
+
+        Fallback go_to_position uses last commanded position, not MON readback, so step size
+        stays consistent when read_channel is configured.
+        """
+        base_um = piezo.get_last_commanded_position()
+        if base_um is None:
+            base_um = piezo.get_current_position()
+        try:
+            piezo.step_position(signed_dx)
+        except Exception:
+            piezo.go_to_position(base_um + signed_dx)
+
     def _step_piezo_left(self, event):
         """Step piezo X left"""
         if not self.piezo_x:
@@ -987,10 +1076,8 @@ class Qt3MoveApp(tk.Tk):
 
         def do_move():
             try:
-                step = float(self.piezo_x_step_var.get())
-                current_pos = self.piezo_x.get_current_position()
-                new_x = current_pos - step
-                self.piezo_x.go_to_position(new_x)
+                step = abs(float(self.step_var.get()))
+                self._piezo_arrow_step_delta(self.piezo_x, -step)
             except ValueError:
                 pass
 
@@ -1003,10 +1090,8 @@ class Qt3MoveApp(tk.Tk):
 
         def do_move():
             try:
-                step = float(self.piezo_x_step_var.get())
-                current_pos = self.piezo_x.get_current_position()
-                new_x = current_pos + step
-                self.piezo_x.go_to_position(new_x)
+                step = abs(float(self.step_var.get()))
+                self._piezo_arrow_step_delta(self.piezo_x, step)
             except ValueError:
                 pass
 
@@ -1019,10 +1104,8 @@ class Qt3MoveApp(tk.Tk):
 
         def do_move():
             try:
-                step = float(self.piezo_y_step_var.get())
-                current_pos = self.piezo_y.get_current_position()
-                new_y = current_pos + step
-                self.piezo_y.go_to_position(new_y)
+                step = abs(float(self.step_var.get()))
+                self._piezo_arrow_step_delta(self.piezo_y, step)
             except ValueError:
                 pass
 
@@ -1035,10 +1118,36 @@ class Qt3MoveApp(tk.Tk):
 
         def do_move():
             try:
-                step = float(self.piezo_y_step_var.get())
-                current_pos = self.piezo_y.get_current_position()
-                new_y = current_pos - step
-                self.piezo_y.go_to_position(new_y)
+                step = abs(float(self.step_var.get()))
+                self._piezo_arrow_step_delta(self.piezo_y, -step)
+            except ValueError:
+                pass
+
+        self._run_piezo_manual(do_move)
+
+    def _step_piezo_page_up(self, event):
+        """Step piezo Z up (positive)"""
+        if not self.piezo_z:
+            return
+
+        def do_move():
+            try:
+                step = abs(float(self.step_var.get()))
+                self._piezo_arrow_step_delta(self.piezo_z, step)
+            except ValueError:
+                pass
+
+        self._run_piezo_manual(do_move)
+
+    def _step_piezo_page_down(self, event):
+        """Step piezo Z down (negative)"""
+        if not self.piezo_z:
+            return
+
+        def do_move():
+            try:
+                step = abs(float(self.step_var.get()))
+                self._piezo_arrow_step_delta(self.piezo_z, -step)
             except ValueError:
                 pass
 

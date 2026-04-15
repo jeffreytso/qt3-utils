@@ -1,3 +1,5 @@
+from typing import Optional
+
 from .nidaqvoltage import NidaqVoltageController
 
 class NidaqPositionController(NidaqVoltageController):
@@ -86,7 +88,7 @@ class NidaqPositionController(NidaqVoltageController):
         self.max_position = max_position
         self.settling_time_in_seconds = move_settle_time
         self.invert_axis = invert_axis
-        self._last_position_microns = None  # Used when no read_channel; else MON drives display
+        self._last_position_microns = None  # Last commanded position (µm); independent of MON readback
 
         # Invert the axis if specified by self.modifying scale_microns_per_volt
         # and self.zero_microns_volt_offset.
@@ -190,12 +192,16 @@ class NidaqPositionController(NidaqVoltageController):
         '''True if the user has set a position at least once (so "Current" is known).'''
         return self._last_position_microns is not None
 
+    def get_last_commanded_position(self) -> Optional[float]:
+        '''Last position commanded via go_to_position / step_position (µm), or None. Never reads MON.'''
+        return self._last_position_microns
+
     def get_current_position(self) -> float:
         '''
-        Returns position (µm) for the "Previous Value" display.
-        When read_channel (MON) is configured, reads from the MON cable so the
-        display shows actual feedback. Otherwise uses last commanded position
-        (or voltage-derived position if available).
+        Returns position (µm), preferring MON readback when read_channel is configured.
+
+        For UI that should track commanded position instead of inaccurate read channels,
+        use get_last_commanded_position().
         '''
         if self.read_channel is not None:
             try:
