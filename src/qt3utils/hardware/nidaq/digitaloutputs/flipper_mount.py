@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import List, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence
 
 import nidaqmx
 
@@ -12,13 +12,30 @@ class FlipperMountError(Exception):
     """Raised when flipper DAQ operations fail."""
 
 
+def _resolve_line_spec(device_name: str, line: str) -> str:
+    """Build a full physical channel string for ``add_do_chan``."""
+    line = line.strip().strip("/")
+    if not line:
+        raise ValueError("empty digital line spec")
+    if line.startswith(f"{device_name}/"):
+        return line
+    return f"{device_name}/{line}"
+
+
 class FlipperMountController:
     """
-    Drives one digital port (multiple lines) with software-timed writes.
+    Software-timed static digital output for TTL flipper inputs (rising/falling edges).
 
-    Tracks last commanded line levels so only intentional transitions occur.
-    After connect, all lines are driven high once (rising edge on any line that
-    was low) so software state matches the usual "UP" idle level.
+    **NI USB-6343 (BNC):** front-panel digital / PFI BNCs appear in NI-DAQmx as
+    ``port1/line0``–``line7`` (PFI 0–7) and ``port2/line0``–``line7`` (PFI 8–15).
+    ``port0`` lines live on the 37-pin D connector. Timed waveform DO is often
+    restricted to port0 on X Series, but **static** writes used here are valid on
+    port1/port2 for TTL-style control—match each flipper's ``line`` in YAML to the
+    BNC you wired.
+
+    **Construction:** either a contiguous port range (legacy), or an explicit ordered
+    list of lines (e.g. four ``port2/line0``…``line3`` entries for BNC DIO). Write
+    order matches the order of ``line_channels``.
     """
 
     def __init__(
@@ -27,18 +44,31 @@ class FlipperMountController:
         port: str = "port0",
         line_start: int = 0,
         n_lines: int = 4,
+        line_channels: Optional[Sequence[str]] = None,
     ) -> None:
-        if n_lines < 1:
-            raise ValueError("n_lines must be at least 1")
         self._device_name = device_name
-        self._port = port
-        self._line_start = line_start
-        self._n = n_lines
-        last = line_start + n_lines - 1
-        self._channel_string = f"{device_name}/{port}/line{line_start}:{last}"
         self._task: Optional[nidaqmx.Task] = None
-        self._levels: List[bool] = [False] * n_lines
         self._lock = threading.Lock()
+
+        if line_channels is not None:
+            specs = list(line_channels)
+            if len(specs) < 1:
+                raise ValueError("line_channels must be non-empty")
+            resolved = [_resolve_line_spec(device_name, s) for s in specs]
+            self._channel_string = ",".join(resolved)
+            self._n = len(resolved)
+            self._port = ""
+            self._line_start = 0
+        else:
+            if n_lines < 1:
+                raise ValueError("n_lines must be at least 1")
+            self._port = port
+            self._line_start = line_start
+            self._n = n_lines
+            last = line_start + n_lines - 1
+            self._channel_string = f"{device_name}/{port}/line{line_start}:{last}"
+
+        self._levels: List[bool] = [False] * self._n
 
     @property
     def channel_string(self) -> str:
@@ -104,6 +134,27 @@ class FlipperMountController:
                 self._levels = lst
             except Exception as e:
                 raise FlipperMountError(f"write failed: {e}") from e
+
+    def apply_partial(self, updates: Mapping[int, bool]) -> None:
+        """
+        Set only the listed line indices to the given levels; all other lines
+        keep their last commanded values (no edges on unchanged lines).
+        """
+        if not updates:
+            return
+        with self._lock:
+            if self._task is None:
+                raise FlipperMountError("Not connected")
+            new = list(self._levels)
+            for i, v in updates.items():
+                if i < 0 or i >= self._n:
+                    raise IndexError(f"flipper index out of range: {i}")
+                new[i] = bool(v)
+            try:
+                self._task.write(new)
+                self._levels = new
+            except Exception as e:
+                raise FlipperMountError(f"apply_partial failed: {e}") from e
 
     def toggle(self, index: int) -> None:
         if index < 0 or index >= self._n:

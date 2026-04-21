@@ -75,4 +75,5 @@ qt3mirror = "qt3utils.applications.qt3mirror.main:main"
 "qt3utils.applications.qt3move" = ["*.yaml"]
 "qt3utils.applications.qt3scan.config_files" = ["*.yaml"]
 "qt3utils.applications.qt3scope.config_files" = ["*.yaml"]
+"qt3utils.applications.qt3mirror.config_files" = ["*.yaml"]
 "qt3utils.config_files" = ["*.yaml", "*.dll"]

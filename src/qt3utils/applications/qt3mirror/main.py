@@ -1,30 +1,36 @@
 """Tkinter control panel for Newport-style TTL flipper mounts on NI-DAQ digital outputs."""
 from __future__ import annotations
 
+import argparse
 import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
+from qt3utils.applications.qt3mirror.config import (
+    N_FLIPPERS,
+    FlipperPreset,
+    Qt3MirrorConfig,
+    load_flipper_config,
+)
 from qt3utils.hardware.nidaq.digitaloutputs import FlipperMountController, FlipperMountError
+
+DAQ_DEVICE = "Dev1"
+# Minimum delay after each DAQ command before the UI accepts another (debounce / move time).
+SETTLE_MS_AFTER_COMMAND = 500
 
 
 class FlipperMirrorApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, app_config: Qt3MirrorConfig) -> None:
         self.root = root
+        self._app_cfg = app_config
         root.title("Qt3 Mirror — Flipper DAQ")
         root.resizable(False, False)
         self._controller: Optional[FlipperMountController] = None
-        self._n_lines: int = 4
+        self._n_lines: int = N_FLIPPERS
         self._busy = False
-
-        self._device_var = tk.StringVar(value="Dev1")
-        self._port_var = tk.StringVar(value="port0")
-        self._line_start_var = tk.StringVar(value="0")
-        self._n_lines_var = tk.StringVar(value="4")
-        self._settle_var = tk.StringVar(value="500")
 
         self._status_var = tk.StringVar(value="Disconnected.")
         self._flipper_state_vars: List[tk.StringVar] = []
@@ -39,29 +45,9 @@ class FlipperMirrorApp:
 
         conn = ttk.LabelFrame(outer, text="DAQ connection", padding="8")
         conn.grid(row=0, column=0, sticky="ew", **pad)
-        for c in range(4):
-            conn.columnconfigure(c, weight=1)
-
-        ttk.Label(conn, text="Device").grid(row=0, column=0, sticky="w")
-        ttk.Entry(conn, textvariable=self._device_var, width=12).grid(
-            row=0, column=1, sticky="ew", padx=(4, 8)
-        )
-        ttk.Label(conn, text="Port").grid(row=0, column=2, sticky="w")
-        ttk.Entry(conn, textvariable=self._port_var, width=10).grid(
-            row=0, column=3, sticky="ew", padx=(4, 0)
-        )
-
-        ttk.Label(conn, text="First line").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(conn, textvariable=self._line_start_var, width=6).grid(
-            row=1, column=1, sticky="w", padx=(4, 8), pady=(6, 0)
-        )
-        ttk.Label(conn, text="# lines").grid(row=1, column=2, sticky="w", pady=(6, 0))
-        ttk.Entry(conn, textvariable=self._n_lines_var, width=6).grid(
-            row=1, column=3, sticky="w", padx=(4, 0), pady=(6, 0)
-        )
 
         btn_row = ttk.Frame(conn)
-        btn_row.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        btn_row.grid(row=0, column=0, sticky="ew")
         self._connect_btn = ttk.Button(btn_row, text="Connect", command=self._connect)
         self._connect_btn.pack(side=tk.LEFT, padx=(0, 6))
         self._disconnect_btn = ttk.Button(
@@ -76,24 +62,13 @@ class FlipperMirrorApp:
         )
         self._sync_btn.pack(side=tk.LEFT)
 
-        settle_row = ttk.Frame(conn)
-        settle_row.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
-        ttk.Label(settle_row, text="Settle time (ms) after each command").pack(
-            side=tk.LEFT
+        ctrl = ttk.LabelFrame(
+            outer, text="Flippers (open-loop — no position readback)", padding="8"
         )
-        ttk.Spinbox(
-            settle_row,
-            from_=0,
-            to=60000,
-            textvariable=self._settle_var,
-            width=8,
-        ).pack(side=tk.LEFT, padx=(6, 0))
-
-        ctrl = ttk.LabelFrame(outer, text="Flippers (open-loop — no position readback)", padding="8")
         ctrl.grid(row=1, column=0, sticky="ew", **pad)
 
         bulk = ttk.Frame(ctrl)
-        bulk.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+        bulk.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
         self._all_up_btn = ttk.Button(
             bulk, text="All up", command=self._all_up, state=tk.DISABLED
         )
@@ -104,14 +79,12 @@ class FlipperMirrorApp:
         self._all_down_btn.pack(side=tk.LEFT)
 
         self._toggle_btns: List[ttk.Button] = []
-        n_default = 4
-        for i in range(n_default):
+        for i in range(N_FLIPPERS):
             sv = tk.StringVar(value="—")
             self._flipper_state_vars.append(sv)
             row = 1 + i
-            ttk.Label(ctrl, text=f"Flipper {i + 1}").grid(
-                row=row, column=0, sticky="w", pady=2
-            )
+            name = self._app_cfg.flipper_names[i]
+            ttk.Label(ctrl, text=name).grid(row=row, column=0, sticky="w", pady=2)
             ttk.Label(ctrl, textvariable=sv, width=14).grid(
                 row=row, column=1, sticky="w", padx=(8, 8), pady=2
             )
@@ -124,15 +97,21 @@ class FlipperMirrorApp:
             b.grid(row=row, column=2, sticky="e", pady=2)
             self._toggle_btns.append(b)
 
-        status = ttk.Label(outer, textvariable=self._status_var, wraplength=420)
-        status.grid(row=2, column=0, sticky="ew", **pad)
+        presets = ttk.LabelFrame(outer, text="Presets", padding="8")
+        presets.grid(row=2, column=0, sticky="ew", **pad)
+        self._preset_btns: List[ttk.Button] = []
+        for pr in self._app_cfg.presets:
+            b = ttk.Button(
+                presets,
+                text=pr.label,
+                command=lambda p=pr: self._apply_preset(p),
+                state=tk.DISABLED,
+            )
+            b.pack(anchor="w", pady=2)
+            self._preset_btns.append(b)
 
-    def _parse_int(self, var: tk.StringVar, label: str) -> int:
-        raw = var.get().strip()
-        try:
-            return int(raw, 10)
-        except ValueError as e:
-            raise ValueError(f"{label} must be an integer (got {raw!r})") from e
+        status = ttk.Label(outer, textvariable=self._status_var, wraplength=420)
+        status.grid(row=3, column=0, sticky="ew", **pad)
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -152,6 +131,8 @@ class FlipperMirrorApp:
                 b.configure(state=tk.DISABLED)
             else:
                 b.configure(state=tk.NORMAL)
+        for b in self._preset_btns:
+            b.configure(state=bulk_state)
 
     def _refresh_flipper_labels(self) -> None:
         if not self._controller or not self._controller.connected:
@@ -176,26 +157,6 @@ class FlipperMirrorApp:
     def _connect(self) -> None:
         if self._busy:
             return
-        try:
-            device = self._device_var.get().strip() or "Dev1"
-            port = self._port_var.get().strip() or "port0"
-            line_start = self._parse_int(self._line_start_var, "First line")
-            n_lines = self._parse_int(self._n_lines_var, "# lines")
-            if n_lines < 1 or n_lines > 32:
-                raise ValueError("# lines must be between 1 and 32")
-            if line_start < 0:
-                raise ValueError("First line must be non-negative")
-        except ValueError as e:
-            messagebox.showerror("Flipper DAQ", str(e))
-            return
-
-        if n_lines != len(self._toggle_btns):
-            messagebox.showerror(
-                "Flipper DAQ",
-                f"This panel has {len(self._toggle_btns)} flipper rows; set # lines to "
-                f"{len(self._toggle_btns)} or change the GUI.",
-            )
-            return
 
         self._set_busy(True)
 
@@ -204,10 +165,8 @@ class FlipperMirrorApp:
             ctrl: Optional[FlipperMountController] = None
             try:
                 ctrl = FlipperMountController(
-                    device_name=device,
-                    port=port,
-                    line_start=line_start,
-                    n_lines=n_lines,
+                    DAQ_DEVICE,
+                    line_channels=self._app_cfg.flipper_lines,
                 )
                 ctrl.connect()
             except FlipperMountError as e:
@@ -222,7 +181,7 @@ class FlipperMirrorApp:
                     self._controller = None
                 else:
                     self._controller = ctrl
-                    self._n_lines = n_lines
+                    self._n_lines = N_FLIPPERS
                 self._refresh_flipper_labels()
                 self._refresh_status()
                 self._update_widget_states()
@@ -246,13 +205,6 @@ class FlipperMirrorApp:
         self._disconnect()
         self.root.destroy()
 
-    def _settle_ms(self) -> int:
-        try:
-            v = int(float(self._settle_var.get()))
-            return max(0, v)
-        except (TypeError, ValueError):
-            return 500
-
     def _daq_call(self, op: Callable[[], None]) -> None:
         if self._busy or self._controller is None:
             return
@@ -266,7 +218,7 @@ class FlipperMirrorApp:
                 err = e
             except Exception as e:
                 err = e
-            time.sleep(self._settle_ms() / 1000.0)
+            time.sleep(SETTLE_MS_AFTER_COMMAND / 1000.0)
 
             def finish() -> None:
                 self._refresh_flipper_labels()
@@ -282,7 +234,9 @@ class FlipperMirrorApp:
     def _sync_all_up(self) -> None:
         if self._controller is None:
             return
-        self._daq_call(self._controller.sync_all_up)
+        low = self._app_cfg.sync_pulse_low_ms
+        high = self._app_cfg.sync_pulse_high_ms
+        self._daq_call(lambda: self._controller.sync_all_up(low, high))
 
     def _all_up(self) -> None:
         if self._controller is None:
@@ -299,13 +253,36 @@ class FlipperMirrorApp:
             return
         self._daq_call(lambda: self._controller.toggle(index))
 
+    def _apply_preset(self, preset: FlipperPreset) -> None:
+        if self._controller is None:
+            return
+        updates: Dict[int, bool] = preset.targets_dict()
+        self._daq_call(lambda: self._controller.apply_partial(updates))
 
-def main() -> None:
+
+def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Qt3 Mirror — flipper DAQ control (tkinter).")
+    p.add_argument(
+        "--config",
+        metavar="PATH",
+        help="YAML flipper config (default: bundled qt3mirror_base.yaml)",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = _parse_args(argv)
+    try:
+        cfg = load_flipper_config(args.config)
+    except Exception as e:
+        print(f"qt3mirror: failed to load config: {e}", file=sys.stderr)
+        sys.exit(1)
+
     root = tk.Tk()
     btn_font = ("Segoe UI", 9) if sys.platform == "win32" else ("TkDefaultFont", 9)
     root.option_add("*TButton*Font", btn_font)
     root.option_add("*TLabel*Font", btn_font)
-    FlipperMirrorApp(root)
+    FlipperMirrorApp(root, cfg)
     root.mainloop()
 
 

@@ -30,6 +30,12 @@ LASER_CONFIG = [
     # {'ip': '192.168.0.97', 'switch_port': 3, 'socket_port': 5000},
 ]
 
+# Default NI-DAQ settings for photodetectors (used by Connect System)
+DEFAULT_DAQ_DEVICE = "Dev1"
+DEFAULT_PD_CHANNEL_PDA50B2 = "ai2"
+DEFAULT_PD_CHANNEL_PDA10CS2 = "ai1"
+DEFAULT_PD_CHANNEL_PDA100A2 = "ai0"
+
 # ==============================================================================
 # PHOTODETECTOR CONTROLLER
 # ==============================================================================
@@ -508,45 +514,36 @@ class LaserSweepApp:
         main_frame = tk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Connection
-        conn_frame = tk.LabelFrame(main_frame, text="Laser and Optical Switch Connection")
-        conn_frame.pack(fill="x", padx=10, pady=5)
-        self.btn_connect = tk.Button(conn_frame, text="Connect System", command=self.connect_hardware, bg="#dddddd")
-        self.btn_connect.pack(side="left", padx=5, pady=5)
-        self.lbl_status = tk.Label(conn_frame, text="Status: Disconnected", fg="red")
-        self.lbl_status.pack(side="left", padx=5)
+        # Hardware init: VISA (lasers + switch) and NI-DAQ photodetectors are separate steps
+        init_frame = tk.LabelFrame(main_frame, text="Initialization")
+        init_frame.pack(fill="x", padx=10, pady=5)
+        init_inner = tk.Frame(init_frame)
+        init_inner.pack(fill="x", padx=5, pady=5)
+        self.btn_connect_lasers = tk.Button(
+            init_inner,
+            text="Initialize lasers & optical switch",
+            command=self.connect_lasers_and_switch,
+            bg="#dddddd",
+        )
+        self.btn_connect_lasers.pack(fill="x", padx=5, pady=3)
+        self.btn_connect_detectors = tk.Button(
+            init_inner,
+            text="Initialize photodetectors",
+            command=self.connect_photodetectors,
+            bg="#dddddd",
+        )
+        self.btn_connect_detectors.pack(fill="x", padx=5, pady=3)
 
-        # Photodetector Configuration
-        self.detector_config_frame = tk.LabelFrame(main_frame, text="Photodetector Configuration")
-        self.detector_config_frame.pack(fill="x", padx=10, pady=5)
-        
-        tk.Label(self.detector_config_frame, text="DAQ Device:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
-        self.ent_daq_device = tk.Entry(self.detector_config_frame, width=10)
-        self.ent_daq_device.grid(row=0, column=1, padx=5, pady=5)
-        self.ent_daq_device.insert(0, "Dev1")
-        
-        tk.Label(self.detector_config_frame, text="PDA50B2 Channel:").grid(row=0, column=2, sticky="e", padx=5, pady=5)
-        self.ent_channel1 = tk.Entry(self.detector_config_frame, width=10)
-        self.ent_channel1.grid(row=0, column=3, padx=5, pady=5)
-        self.ent_channel1.insert(0, "ai2")
-        
-        tk.Label(self.detector_config_frame, text="PDA10CS2 Channel:").grid(row=0, column=4, sticky="e", padx=5, pady=5)
-        self.ent_channel2 = tk.Entry(self.detector_config_frame, width=10)
-        self.ent_channel2.grid(row=0, column=5, padx=5, pady=5)
-        self.ent_channel2.insert(0, "ai1")
-        
-        tk.Label(self.detector_config_frame, text="PDA100A2 Channel:").grid(row=0, column=6, sticky="e", padx=5, pady=5)
-        self.ent_channel3 = tk.Entry(self.detector_config_frame, width=10)
-        self.ent_channel3.grid(row=0, column=7, padx=5, pady=5)
-        self.ent_channel3.insert(0, "ai0")
-        
-        detector_btn_frame = tk.Frame(self.detector_config_frame)
-        detector_btn_frame.grid(row=1, column=0, columnspan=8, sticky="w")
-        self.btn_init_detectors = tk.Button(detector_btn_frame, text="Initialize Detectors", 
-                                            command=self.init_detectors, bg="#dddddd")
-        self.btn_init_detectors.pack(side="left", padx=5, pady=5)
-        self.lbl_detector_status = tk.Label(detector_btn_frame, text="Detectors: Not Initialized", fg="red")
-        self.lbl_detector_status.pack(side="left", padx=5)
+        status_frame = tk.Frame(main_frame)
+        status_frame.pack(fill="x", padx=10, pady=(0, 5))
+        self.lbl_status = tk.Label(
+            status_frame,
+            text="Status: Lasers/switch — not connected | Photodetectors — not connected",
+            fg="red",
+            anchor="w",
+            justify="left",
+        )
+        self.lbl_status.pack(side="left", fill="x", expand=True)
 
         # Manual Control
         manual_frame = tk.LabelFrame(main_frame, text="Manual Control")
@@ -777,34 +774,41 @@ class LaserSweepApp:
 
     def log(self, msg):
         print(msg)
+
+    def _refresh_connection_status(self):
+        """Update status label from ctrl.is_connected and detector_ctrl."""
+        if self.ctrl.is_connected:
+            laser_part = f"Lasers/switch — OK ({len(self.ctrl.lasers)} lasers)"
+        else:
+            laser_part = "Lasers/switch — not connected"
+        if self.detector_ctrl:
+            pd_part = f"Photodetectors — OK ({DEFAULT_DAQ_DEVICE})"
+        else:
+            pd_part = "Photodetectors — not connected"
+        if self.ctrl.is_connected and self.detector_ctrl:
+            fg = "green"
+        elif self.ctrl.is_connected or self.detector_ctrl:
+            fg = "darkorange"
+        else:
+            fg = "red"
+        self.lbl_status.config(
+            text=f"Status: {laser_part} | {pd_part}",
+            fg=fg,
+        )
     
-    def init_detectors(self):
-        """Initialize the photodetector controller with user-specified settings."""
-        try:
-            device_name = self.ent_daq_device.get().strip()
-            channel1 = self.ent_channel1.get().strip()
-            channel2 = self.ent_channel2.get().strip()
-            channel3_raw = self.ent_channel3.get().strip()
-            channel3 = channel3_raw if channel3_raw else None
-            
-            if not device_name or not channel1 or not channel2:
-                messagebox.showerror("Error", "Please specify DAQ device and both PDA50B2 and PDA10CS2 channels.")
-                return
-            
-            test_ctrl = PhotodetectorController(device_name, channel1, channel2, channel3=channel3)
-            if channel3:
-                test_ctrl.read_three_detectors()
-            else:
-                test_ctrl.read_both_detectors()
-            
-            self.detector_ctrl = PhotodetectorController(device_name, channel1, channel2, channel3=channel3)
-            self.lbl_detector_status.config(text="Detectors: Initialized", fg="green")
-            ch_info = f"{channel1}, {channel2}" + (f", {channel3}" if channel3 else "")
-            self.log(f"Detectors initialized: {device_name}, Channels: {ch_info}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to initialize detectors: {e}")
-            self.lbl_detector_status.config(text="Detectors: Error", fg="red")
-            self.detector_ctrl = None
+    def _init_detectors_defaults(self):
+        """Initialize photodetector DAQ using built-in defaults (Dev1 / ai2, ai1, ai0)."""
+        device_name = DEFAULT_DAQ_DEVICE
+        channel1 = DEFAULT_PD_CHANNEL_PDA50B2
+        channel2 = DEFAULT_PD_CHANNEL_PDA10CS2
+        channel3 = DEFAULT_PD_CHANNEL_PDA100A2
+
+        test_ctrl = PhotodetectorController(device_name, channel1, channel2, channel3=channel3)
+        test_ctrl.read_three_detectors()
+
+        self.detector_ctrl = PhotodetectorController(device_name, channel1, channel2, channel3=channel3)
+        ch_info = f"{channel1}, {channel2}, {channel3}"
+        self.log(f"Detectors initialized: {device_name}, Channels: {ch_info}")
     
     def clear_detector_data(self):
         """Clear all collected detector data."""
@@ -1208,25 +1212,46 @@ class LaserSweepApp:
             self.lbl_down_sub.grid()
             self.ent_down_sub.grid()
 
-    def connect_hardware(self):
+    def connect_lasers_and_switch(self):
         try:
-            msg = self.ctrl.connect()
-            self.lbl_status.config(text=msg, fg="green")
-            self.btn_connect.config(state="disabled")
+            laser_msg = self.ctrl.connect()
+            self.btn_connect_lasers.config(state="disabled")
             self.btn_set_manual.config(state="normal")
             self.btn_set_power.config(state="normal")
             self.btn_start.config(state="normal")
-            
-            # Populate laser dropdown for continuous sweep
+
             laser_options = ["Auto"]
             for i, laser in enumerate(self.ctrl.lasers):
                 laser_options.append(f"Laser {i+1} ({laser['min']:.1f}-{laser['max']:.1f} nm)")
-            self.combo_cont_laser['values'] = laser_options
+            self.combo_cont_laser["values"] = laser_options
             self.combo_cont_laser.set("Auto")
-            
-            self.log("Connected.")
+
+            self._refresh_connection_status()
+            self.log(f"{laser_msg}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
+
+    def connect_photodetectors(self):
+        try:
+            if self.detector_ctrl:
+                try:
+                    self.detector_ctrl.stop_continuous_sampling()
+                except Exception:
+                    pass
+                self.detector_ctrl = None
+            self._init_detectors_defaults()
+            self.btn_connect_detectors.config(state="disabled")
+            self._refresh_connection_status()
+            self.log("Photodetectors (DAQ) connected.")
+        except Exception as e:
+            self.detector_ctrl = None
+            self._refresh_connection_status()
+            messagebox.showwarning(
+                "Photodetectors (NI-DAQ)",
+                "Photodetector init failed:\n\n"
+                f"{e}\n\n"
+                "Wavelength sweeps can still run if lasers are connected; detector logging will be skipped.",
+            )
 
     def set_manual_wavelength(self):
         try:

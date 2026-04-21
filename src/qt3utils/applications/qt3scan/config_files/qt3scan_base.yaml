@@ -10,7 +10,6 @@ QT3SCAN:
       z_axis_control : PiezoZ
     configure :
       inter_scan_settle_time : 0.01
-      # counter | photodiode — photodiode uses AI1; ensure no conflict with piezo readback on that channel
       signal_source : counter
 
   Counter:
