@@ -6,8 +6,6 @@
 
 2. Make sure theres no unused code in qt3utils and its maintainable for future use
 
-3. For transmission: Heat map, y axis is wavelength and color bar is voltage
-    Add warning for users if points exceed capacity
 
 4. qt3chromatune is unused, but document its existence in case need for future.
 

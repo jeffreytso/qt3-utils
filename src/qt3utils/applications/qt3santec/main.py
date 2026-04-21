@@ -8,6 +8,7 @@ import time
 import threading
 import nidaqmx
 import numpy as np
+from scipy import stats
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
@@ -756,15 +757,21 @@ class LaserSweepApp:
             'scan_max': None
         }
 
-        # Matplotlib figure and canvas
+        # Plot + toolbar in their own frame. Pack the toolbar first (bottom) so Tk
+        # reserves its height; packing an expanding canvas first can starve or
+        # clip the toolbar and cover the hover coordinate readout.
+        self.viz_plot_frame = tk.Frame(self.viz_frame)
+        self.viz_plot_frame.pack(fill=tk.BOTH, expand=True)
+
         self.viz_fig = Figure(figsize=(8, 5), dpi=100)
         self.viz_ax = self.viz_fig.add_subplot(111)
-        self.viz_canvas = FigureCanvasTkAgg(self.viz_fig, master=self.viz_frame)
+        self.viz_canvas = FigureCanvasTkAgg(self.viz_fig, master=self.viz_plot_frame)
+        self.viz_toolbar = NavigationToolbar2Tk(
+            self.viz_canvas, self.viz_plot_frame, pack_toolbar=False)
+        self.viz_toolbar.pack(side=tk.BOTTOM, fill=tk.X)
         self.viz_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        
-        # Navigation toolbar
-        self.viz_toolbar = NavigationToolbar2Tk(self.viz_canvas, self.viz_frame)
         self.viz_toolbar.update()
+        self.viz_toolbar.lift()
         
         # Store colorbar reference for cleanup
         self.viz_colorbar = None
@@ -898,7 +905,7 @@ class LaserSweepApp:
                 self.ent_v_max.insert(0, f"{v_max + 0.1:.4f}")
         
         viz_mode = self.combo_viz_mode.get()
-        if viz_mode == "Wavelength Graph" and data['wavelengths']:
+        if viz_mode in ("Wavelength Graph", "Heat Map") and data['wavelengths']:
             wavelengths = np.array(data['wavelengths'])
             wl_min, wl_max = np.min(wavelengths), np.max(wavelengths)
             wl_range = wl_max - wl_min
@@ -984,94 +991,115 @@ class LaserSweepApp:
         self.viz_canvas.draw()
     
     def update_heatmap(self, detector_name):
-        """Update heat map visualization for selected detector."""
+        """Update heat map: scan vs wavelength, color encodes mean voltage per bin."""
         data = self.detector_data[detector_name]
-        
-        if not data['voltages']:
-            self.viz_ax.text(0.5, 0.5, 'No data collected yet', 
-                           ha='center', va='center', transform=self.viz_ax.transAxes)
+        title = f'{detector_name} - Heat Map'
+
+        def _axes_labels():
             self.viz_ax.set_xlabel('Scan Number')
-            self.viz_ax.set_ylabel('Voltage (V)')
-            self.viz_ax.set_title(f'{detector_name} - Heat Map')
+            self.viz_ax.set_ylabel('Wavelength (nm)')
+            self.viz_ax.set_title(title)
+
+        if not data['voltages'] or not data['wavelengths']:
+            self.viz_ax.text(0.5, 0.5, 'No data collected yet',
+                             ha='center', va='center', transform=self.viz_ax.transAxes)
+            _axes_labels()
             return
-        
-        # Use consistent length (guard against race where sweep thread appends mid-read)
-        n = min(len(data['voltages']), len(data['scans']))
+
+        n = min(len(data['voltages']), len(data['wavelengths']), len(data['scans']))
         if n == 0:
+            _axes_labels()
             return
+
         voltages = np.array(data['voltages'][:n])
+        wavelengths = np.array(data['wavelengths'][:n])
         scans = np.array(data['scans'][:n])
-        
-        if len(voltages) == 0:
-            self.viz_ax.text(0.5, 0.5, 'No data collected yet', 
-                           ha='center', va='center', transform=self.viz_ax.transAxes)
-            self.viz_ax.set_xlabel('Scan Number')
-            self.viz_ax.set_ylabel('Voltage (V)')
-            self.viz_ax.set_title(f'{detector_name} - Heat Map')
+
+        valid = np.isfinite(voltages) & np.isfinite(wavelengths)
+        if not np.any(valid):
+            self.viz_ax.text(0.5, 0.5, 'No valid data',
+                             ha='center', va='center', transform=self.viz_ax.transAxes)
+            _axes_labels()
             return
-        
-        # Get unique scan numbers
+
+        voltages = voltages[valid]
+        wavelengths = wavelengths[valid]
+        scans = scans[valid]
+
         unique_scans = np.unique(scans)
         if len(unique_scans) == 0:
+            _axes_labels()
             return
-        
-        # Apply user-specified bounds or use data range
+
         v_min_data, v_max_data = np.min(voltages), np.max(voltages)
         if v_max_data == v_min_data:
-            v_max_data = v_min_data + 0.1  # Avoid division by zero
-        
+            v_max_data = v_min_data + 0.1
+
         v_min = self.viz_bounds['v_min'] if self.viz_bounds['v_min'] is not None else v_min_data
         v_max = self.viz_bounds['v_max'] if self.viz_bounds['v_max'] is not None else v_max_data
-        
-        # Apply scan bounds
-        scan_min_data, scan_max_data = unique_scans[0], unique_scans[-1]
+
+        wl_min_data, wl_max_data = np.min(wavelengths), np.max(wavelengths)
+        if wl_max_data == wl_min_data:
+            wl_max_data = wl_min_data + 0.1
+
+        wl_min = self.viz_bounds['wl_min'] if self.viz_bounds['wl_min'] is not None else wl_min_data
+        wl_max = self.viz_bounds['wl_max'] if self.viz_bounds['wl_max'] is not None else wl_max_data
+
+        scan_min_data, scan_max_data = int(unique_scans[0]), int(unique_scans[-1])
         scan_min = self.viz_bounds['scan_min'] if self.viz_bounds['scan_min'] is not None else scan_min_data
         scan_max = self.viz_bounds['scan_max'] if self.viz_bounds['scan_max'] is not None else scan_max_data
-        
-        # Filter scans within bounds
+
         scan_mask = (unique_scans >= scan_min) & (unique_scans <= scan_max)
         filtered_scans = unique_scans[scan_mask]
-        
+
         if len(filtered_scans) == 0:
-            self.viz_ax.text(0.5, 0.5, 'No data in specified scan range', 
-                           ha='center', va='center', transform=self.viz_ax.transAxes)
-            self.viz_ax.set_xlabel('Scan Number')
-            self.viz_ax.set_ylabel('Voltage (V)')
-            self.viz_ax.set_title(f'{detector_name} - Heat Map')
+            self.viz_ax.text(0.5, 0.5, 'No data in specified scan range',
+                             ha='center', va='center', transform=self.viz_ax.transAxes)
+            _axes_labels()
             return
-        
-        # Create voltage bins
+
         num_bins = 50
-        
-        # Create 2D histogram: rows = voltage bins, columns = scan numbers
-        # np.histogram returns num_bins values when given num_bins as parameter
-        heatmap_data = np.zeros((num_bins, len(filtered_scans)))
-        
+        heatmap_data = np.full((num_bins, len(filtered_scans)), np.nan)
+
         for i, scan_num in enumerate(filtered_scans):
-            scan_mask = scans == scan_num
-            scan_voltages = voltages[scan_mask]
-            
-            if len(scan_voltages) > 0:
-                # Count occurrences in each voltage bin for this scan
-                # Use num_bins directly - np.histogram will create bins and return num_bins values
-                hist, _ = np.histogram(scan_voltages, bins=num_bins, range=(v_min, v_max))
-                heatmap_data[:, i] = hist
-        
-        # Plot heat map
-        im = self.viz_ax.imshow(heatmap_data, aspect='auto', origin='lower',
-                               extent=[scan_min-0.5, scan_max+0.5,
-                                      v_min, v_max],
-                               cmap='viridis', interpolation='nearest')
-        # Create colorbar and store reference
-        self.viz_colorbar = self.viz_fig.colorbar(im, ax=self.viz_ax, label='Count')
-        self.viz_ax.set_xlabel('Scan Number')
-        self.viz_ax.set_ylabel('Voltage (V)')
-        self.viz_ax.set_title(f'{detector_name} - Heat Map')
-        
-        # Apply axis limits
-        self.viz_ax.set_xlim(scan_min - 0.5, scan_max + 0.5)
-        self.viz_ax.set_ylim(v_min, v_max)
-    
+            m = scans == scan_num
+            wl_s = wavelengths[m]
+            v_s = voltages[m]
+            if len(wl_s) == 0:
+                continue
+            stat, _, _ = stats.binned_statistic(
+                wl_s, v_s, statistic='mean', bins=num_bins, range=(wl_min, wl_max))
+            heatmap_data[:, i] = stat
+
+        if not np.any(np.isfinite(heatmap_data)):
+            self.viz_ax.text(0.5, 0.5, 'No data in wavelength / scan range',
+                             ha='center', va='center', transform=self.viz_ax.transAxes)
+            _axes_labels()
+            return
+
+        masked = np.ma.masked_invalid(heatmap_data)
+
+        im = self.viz_ax.imshow(
+            masked, aspect='auto', origin='lower',
+            extent=[scan_min - 0.5, scan_max + 0.5, wl_min, wl_max],
+            cmap='viridis', interpolation='nearest',
+            vmin=v_min, vmax=v_max)
+        self.viz_colorbar = self.viz_fig.colorbar(im, ax=self.viz_ax, label='Voltage (V)')
+        _axes_labels()
+
+        xmin = float(scan_min) - 0.5
+        xmax = float(scan_max) + 0.5
+        self.viz_ax.set_xlim(xmin, xmax)
+        self.viz_ax.set_ylim(wl_min, wl_max)
+        # One tick per column, centered under the column (MaxNLocator(integer=True)
+        # falls back to fractional ticks when the x span is too narrow for its default).
+        ncols = len(filtered_scans)
+        dx = (xmax - xmin) / ncols
+        tick_pos = xmin + (np.arange(ncols) + 0.5) * dx
+        tick_labels = [str(int(s)) for s in filtered_scans]
+        self.viz_ax.set_xticks(tick_pos)
+        self.viz_ax.set_xticklabels(tick_labels)
+
     def update_wavelength_graph(self, detector_name):
         """Update wavelength vs voltage graph for selected detector."""
         data = self.detector_data[detector_name]
